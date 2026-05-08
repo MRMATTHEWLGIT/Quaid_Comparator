@@ -1,203 +1,143 @@
 from __future__ import annotations
-
-import signal
-import sys
-from datetime import datetime
-
-import paho.mqtt.client as mqtt
 import struct
+from dataclasses import dataclass
 
 # =============================================================================
 # Global Constants
 # =============================================================================
 
-# The MQTT host and port
-MQTT_HOST = "127.0.0.1"
-MQTT_PORT = 1883
-MQTT_KEEPALIVE = 60
-
-# What queue number is the data coming from?
-Q_NUMBER = 200
-
-# The main topics to listen to
-OBS_BIN_TOPIC = f"quaid/obs/r{Q_NUMBER}BIN"
-MOCAP_BIN_TOPIC = f"quaid/mocap/r{Q_NUMBER}BIN"
-
-# The client ID to use for the MQTT connection
-CLIENT_ID = "quaid_binary_listener"
-
+# The binary format of the observation data
 OBS_BIN_FORMAT = "<Bhffffffhhhhhhhhffffffffff"
+
+# The binary format of the mocap data
 MOCAP_BIN_FORMAT = "<B?Bhhhfffffff"
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+@dataclass
+class Observation:
+    """A class to store the most recent observation data."""
+    timestamp: str
+    header: int
+    time_delta: int
+    distance: int
+    yaw: int
+    pitch: int
+    roll: int
+    voltage: int
+    current: int
+    position_knee_front_left: int
+    position_thigh_front_left: int
+    position_knee_front_right: int
+    position_thigh_front_right: int
+    position_knee_back_left: int
+    position_thigh_back_left: int
+    position_knee_back_right: int
+    position_thigh_back_right: int
+    current_front_left: int
+    current_front_right: int
+    current_back_left: int
+    current_back_right: int
+    acc_x: int
+    acc_y: int
+    acc_z: int
+    gyro_x: int
+    gyro_y: int
+    gyro_z: int
+
+
+@dataclass
+class MocapObservation:
+    """A class to store the most recent mocap data."""
+    timestamp: str
+    header: int
+    degrees: int
+    rigid_body_no: int
+    x: int
+    y: int
+    z: int
+    yaw: int
+    pitch: int
+    roll: int
+    qr: int
+    qi: int
+    qj: int
+    qk: int
 
 # =============================================================================
 # MQTT Callback Functions
 # =============================================================================
 
-def on_connect(client, userdata, flags, reason_code, properties=None):
-    """Called when the client connects to the MQTT broker."""
+def parse_obs_data(topic, payload, timestamp):
+    """Parse the observation data from the MQTT message payload."""
 
-    # The connection was successful
-    if reason_code == 0:
-        print(f"Connected to MQTT broker on {MQTT_HOST}:{MQTT_PORT}")
+    # An invalid payload length has been detected
+    if len(payload) != struct.calcsize(OBS_BIN_FORMAT):
+        print(f"Invalid payload length for {topic}: {len(payload)}")
+        return None
 
-        # Subscrive to the main topics
-        client.subscribe(OBS_BIN_TOPIC)
-        client.subscribe(MOCAP_BIN_TOPIC)
+    # Unpack the observation data
+    unpacked_data = struct.unpack(OBS_BIN_FORMAT, payload)
 
-        print(f"Subscribed to {OBS_BIN_TOPIC} and {MOCAP_BIN_TOPIC}")
-
-    # The connection was unsuccessful
-    else:
-        print(f"Failed to connect to MQTT broker: {reason_code}")
-
-
-def on_message(client, userdata, message):
-    """Called when a message is received from the MQTT broker."""
-
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    topic = message.topic
-    payload = message.payload
-
-    if topic == OBS_BIN_TOPIC:
-
-        if len(payload) != struct.calcsize(OBS_BIN_FORMAT):
-            print(f"Invalid payload length for {topic}: {len(payload)}")
-            return
-
-        observations = struct.unpack(OBS_BIN_FORMAT, payload)
-
-        header = observations[0]
-        time_delta = observations[1]
-        distance = observations[2]
-        yaw = observations[3]
-        pitch = observations[4]
-        roll = observations[5]
-        voltage = observations[6]
-        current = observations[7]
-        position_knee_front_left = observations[8]
-        position_thigh_front_left = observations[9]
-        position_knee_front_right = observations[10]
-        position_thigh_front_right = observations[11]
-        position_knee_back_left = observations[12]
-        position_thigh_back_left = observations[13]
-        position_knee_back_right = observations[14]
-        position_thigh_back_right = observations[15]
-        current_front_left = observations[16]
-        current_front_right = observations[17]
-        current_back_left = observations[18]
-        current_back_right = observations[19]
-        acc_x = observations[20]
-        acc_y = observations[21]
-        acc_z = observations[22]
-        gyro_x = observations[23]
-        gyro_y = observations[24]
-        gyro_z = observations[25]
-
-        print(f"Header: {header}")
-        print(f"Time delta: {time_delta}")
-        print(f"Distance: {distance}")
-        print(f"Yaw: {yaw}")
-        print(f"Pitch: {pitch}")
-        print(f"Roll: {roll}")
-        print(f"Voltage: {voltage}")
-        print(f"Current: {current}")
-        print(f"Position knee front left: {position_knee_front_left}")
-        print(f"Position thigh front left: {position_thigh_front_left}")
-        print(f"Position knee front right: {position_knee_front_right}")
-        print(f"Position thigh front right: {position_thigh_front_right}")
-        print(f"Position knee back left: {position_knee_back_left}")
-        print(f"Position thigh back left: {position_thigh_back_left}")
-        print(f"Position knee back right: {position_knee_back_right}")
-        print(f"Position thigh back right: {position_thigh_back_right}")
-        print(f"Current front left: {current_front_left}")
-        print(f"Current front right: {current_front_right}")
-        print(f"Current back left: {current_back_left}")
-        print(f"Current back right: {current_back_right}")
-        print(f"Acc x: {acc_x}")
-        print(f"Acc y: {acc_y}")
-        print(f"Acc z: {acc_z}")
-        print(f"Gyro x: {gyro_x}")
-        print(f"Gyro y: {gyro_y}")
-        print(f"Gyro z: {gyro_z}")
-
-    if topic == MOCAP_BIN_TOPIC:
-        if len(payload) != struct.calcsize(MOCAP_BIN_FORMAT):
-            print(f"Invalid payload length for {topic}: {len(payload)}")
-            return
-
-        mocap_observations = struct.unpack(MOCAP_BIN_FORMAT, payload)
-
-        header = mocap_observations[0]
-        degrees = mocap_observations[1]
-        rigid_body_no = mocap_observations[2]
-        x = mocap_observations[3]
-        y = mocap_observations[4]
-        z = mocap_observations[5]
-        yaw = mocap_observations[6]
-        pitch = mocap_observations[7]
-        roll = mocap_observations[8]
-        qr = mocap_observations[9]
-        qi = mocap_observations[10]
-        qj = mocap_observations[11]
-        qk = mocap_observations[12]
-
-        print(f"Header: {header}")
-        print(f"Degrees: {degrees}")
-        print(f"Rigid body no: {rigid_body_no}")
-        print(f"X: {x}")
-        print(f"Y: {y}")
-        print(f"Z: {z}")
-        print(f"Yaw: {yaw}")
-        print(f"Pitch: {pitch}")
-        print(f"Roll: {roll}")
-        print(f"Qr: {qr}")
-        print(f"Qi: {qi}")
-        print(f"Qj: {qj}")
-        print(f"Qk: {qk}")
-
-
-def on_disconnect(client, userdata, reason_code):
-    """Called when the client disconnects from the MQTT broker."""
-    print(f"Disconnected from MQTT broker: {reason_code}")
-
-
-def shutdown_handler(signum, frame):
-    """Called when the program is interrupted with Ctrl+C."""
-    print("\nShutting down...")
-    sys.exit(0)
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-def main():
-    """
-    Connect to MQTT and listen forever.
-    """
-
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
-    client = mqtt.Client(
-        client_id=CLIENT_ID,
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+    # Create and return the observation data
+    return Observation(
+        timestamp=timestamp,
+        header=unpacked_data[0],
+        time_delta=unpacked_data[1],
+        distance=unpacked_data[2],
+        yaw=unpacked_data[3],
+        pitch=unpacked_data[4],
+        roll=unpacked_data[5],
+        voltage=unpacked_data[6],
+        current=unpacked_data[7],
+        position_knee_front_left=unpacked_data[8],
+        position_thigh_front_left=unpacked_data[9],
+        position_knee_front_right=unpacked_data[10],
+        position_thigh_front_right=unpacked_data[11],
+        position_knee_back_left=unpacked_data[12],
+        position_thigh_back_left=unpacked_data[13],
+        position_knee_back_right=unpacked_data[14],
+        position_thigh_back_right=unpacked_data[15],
+        current_front_left=unpacked_data[16],
+        current_front_right=unpacked_data[17],
+        current_back_left=unpacked_data[18],
+        current_back_right=unpacked_data[19],
+        acc_x=unpacked_data[20],
+        acc_y=unpacked_data[21],
+        acc_z=unpacked_data[22],
+        gyro_x=unpacked_data[23],
+        gyro_y=unpacked_data[24],
+        gyro_z=unpacked_data[25],
     )
 
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.on_disconnect = on_disconnect
 
-    print(f"[INFO] Connecting to MQTT broker at {MQTT_HOST}:{MQTT_PORT}...")
+def parse_mocap_data(topic, payload, timestamp):
+    """Parse the mocap data from the MQTT message payload."""
 
-    client.connect(
-        host=MQTT_HOST,
-        port=MQTT_PORT,
-        keepalive=MQTT_KEEPALIVE,
+    # An invalid payload length has been detected
+    if len(payload) != struct.calcsize(MOCAP_BIN_FORMAT):
+        print(f"Invalid payload length for {topic}: {len(payload)}")
+        return None
+
+    # Unpack the mocap data
+    unpacked_data = struct.unpack(MOCAP_BIN_FORMAT, payload)
+
+    # Create and return the mocap data
+    return MocapObservation(
+        timestamp=timestamp,
+        header=unpacked_data[0],
+        degrees=unpacked_data[1],
+        rigid_body_no=unpacked_data[2],
+        x=unpacked_data[3],
+        y=unpacked_data[4],
+        z=unpacked_data[5],
+        yaw=unpacked_data[6],
+        pitch=unpacked_data[7],
+        roll=unpacked_data[8],
+        qr=unpacked_data[9],
+        qi=unpacked_data[10],
+        qj=unpacked_data[11],
+        qk=unpacked_data[12],
     )
-
-    client.loop_forever()
-
-
-if __name__ == "__main__":
-    main()
