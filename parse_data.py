@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
+import struct
 
 # =============================================================================
 # Global Constants
@@ -22,9 +23,11 @@ Q_NUMBER = 200
 OBS_BIN_TOPIC = f"quaid/obs/r{Q_NUMBER}BIN"
 MOCAP_BIN_TOPIC = f"quaid/mocap/r{Q_NUMBER}BIN"
 
+# The client ID to use for the MQTT connection
 CLIENT_ID = "quaid_binary_listener"
 
-PRINT_HEX_BYTES = 80
+OBS_BIN_FORMAT = "<Bhffffffhhhhhhhhffffffffff"
+MOCAP_BIN_FORMAT = "<B?Bhhhfffffff"
 
 # =============================================================================
 # MQTT Callback Functions
@@ -55,19 +58,102 @@ def on_message(client, userdata, message):
     topic = message.topic
     payload = message.payload
 
-    hex_preview = payload[:PRINT_HEX_BYTES].hex(" ")
+    if topic == OBS_BIN_TOPIC:
 
-    print("=" * 80)
-    print(f"Time       : {timestamp}")
-    print(f"Topic      : {topic}")
-    print(f"Bytes      : {len(payload)}")
-    print(f"Hex preview: {hex_preview}")
+        if len(payload) != struct.calcsize(OBS_BIN_FORMAT):
+            print(f"Invalid payload length for {topic}: {len(payload)}")
+            return
 
-    if len(payload) > PRINT_HEX_BYTES:
-        print(f"... truncated, showing first {PRINT_HEX_BYTES} bytes")
+        observations = struct.unpack(OBS_BIN_FORMAT, payload)
 
-    print("=" * 80)
-    print()
+        header = observations[0]
+        time_delta = observations[1]
+        distance = observations[2]
+        yaw = observations[3]
+        pitch = observations[4]
+        roll = observations[5]
+        voltage = observations[6]
+        current = observations[7]
+        position_knee_front_left = observations[8]
+        position_thigh_front_left = observations[9]
+        position_knee_front_right = observations[10]
+        position_thigh_front_right = observations[11]
+        position_knee_back_left = observations[12]
+        position_thigh_back_left = observations[13]
+        position_knee_back_right = observations[14]
+        position_thigh_back_right = observations[15]
+        current_front_left = observations[16]
+        current_front_right = observations[17]
+        current_back_left = observations[18]
+        current_back_right = observations[19]
+        acc_x = observations[20]
+        acc_y = observations[21]
+        acc_z = observations[22]
+        gyro_x = observations[23]
+        gyro_y = observations[24]
+        gyro_z = observations[25]
+
+        print(f"Header: {header}")
+        print(f"Time delta: {time_delta}")
+        print(f"Distance: {distance}")
+        print(f"Yaw: {yaw}")
+        print(f"Pitch: {pitch}")
+        print(f"Roll: {roll}")
+        print(f"Voltage: {voltage}")
+        print(f"Current: {current}")
+        print(f"Position knee front left: {position_knee_front_left}")
+        print(f"Position thigh front left: {position_thigh_front_left}")
+        print(f"Position knee front right: {position_knee_front_right}")
+        print(f"Position thigh front right: {position_thigh_front_right}")
+        print(f"Position knee back left: {position_knee_back_left}")
+        print(f"Position thigh back left: {position_thigh_back_left}")
+        print(f"Position knee back right: {position_knee_back_right}")
+        print(f"Position thigh back right: {position_thigh_back_right}")
+        print(f"Current front left: {current_front_left}")
+        print(f"Current front right: {current_front_right}")
+        print(f"Current back left: {current_back_left}")
+        print(f"Current back right: {current_back_right}")
+        print(f"Acc x: {acc_x}")
+        print(f"Acc y: {acc_y}")
+        print(f"Acc z: {acc_z}")
+        print(f"Gyro x: {gyro_x}")
+        print(f"Gyro y: {gyro_y}")
+        print(f"Gyro z: {gyro_z}")
+
+    if topic == MOCAP_BIN_TOPIC:
+        if len(payload) != struct.calcsize(MOCAP_BIN_FORMAT):
+            print(f"Invalid payload length for {topic}: {len(payload)}")
+            return
+
+        mocap_observations = struct.unpack(MOCAP_BIN_FORMAT, payload)
+
+        header = mocap_observations[0]
+        degrees = mocap_observations[1]
+        rigid_body_no = mocap_observations[2]
+        x = mocap_observations[3]
+        y = mocap_observations[4]
+        z = mocap_observations[5]
+        yaw = mocap_observations[6]
+        pitch = mocap_observations[7]
+        roll = mocap_observations[8]
+        qr = mocap_observations[9]
+        qi = mocap_observations[10]
+        qj = mocap_observations[11]
+        qk = mocap_observations[12]
+
+        print(f"Header: {header}")
+        print(f"Degrees: {degrees}")
+        print(f"Rigid body no: {rigid_body_no}")
+        print(f"X: {x}")
+        print(f"Y: {y}")
+        print(f"Z: {z}")
+        print(f"Yaw: {yaw}")
+        print(f"Pitch: {pitch}")
+        print(f"Roll: {roll}")
+        print(f"Qr: {qr}")
+        print(f"Qi: {qi}")
+        print(f"Qj: {qj}")
+        print(f"Qk: {qk}")
 
 
 def on_disconnect(client, userdata, reason_code):
