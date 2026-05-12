@@ -1,0 +1,118 @@
+%YAML:1.0
+---
+ports:
+  port: /dev/ttyUSB0
+  #  mqtt_server_ip: "tcp://192.168.15.127:1883"
+  mqtt_server_ip: "tcp://mqtt-server:1883"
+  mqtt_queue_no: "100"
+robot:
+  sim: 1
+  env_logger: 1
+  max_steps: 500
+  # in async training: 50 will result in around 14 FPS on Lenovo / 17
+  step_time: 50
+  # when using serial communication the delay after each data received check
+  monitoring_delay: 10
+  # delay between observations being sent from the microcontroller
+  streaming_delay: 25
+  # 0 just wait for 2s and continue, 1 reset sim to the initial state
+  reset_strategy: 1
+  # number of milliseconds to wait after environment reset
+  reset_wait: 1000
+  # exponential filter used on actions
+  exponential_filter: 0.0
+
+  # min/max positions at which it needs to be either turned around or stopped
+  min_x: -1e6
+  max_x: 1e6
+  min_y: -1e6
+  max_y: 1e6
+  debug_mocap: 1
+
+  adjust_theta_on_reset: 1
+  # PI / 4
+  #  adjust_theta_interval: 0.785398163
+  # PI / 8
+  adjust_theta_interval: 0.392699081
+  #  adjust_theta_interval: 0.3
+  # uniform, normal or zero
+  adjust_theta_distribution: uniform
+  adjust_theta_alternate_distribution: uniform
+  # every x steps
+  adjust_theta_alternate_with_forward_every: 100
+  reset_theta_min_steps: 50
+  reset_theta_max_steps: 300
+  mean_yaw_steps: 10000
+
+  # PI / 3 - end episode when yaw reaches +/- this value
+  #  yaw_end_episode: 1.0471975512
+  #   PI / 2
+  yaw_end_episode: 1.570796327
+  #  yaw_end_episode: 0
+
+  offsets:
+    r01: "-15,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0"
+    #original
+    #r02: "-5,-10,0,0,0,0,0,0,-5,20,0,0,0,-10,0,0"
+    # damped
+    r02: "13,-2,0,0,8,-2,0,0,-10,-10,0,0,-3,5,0,0"
+    r03: "10,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0"
+
+observations:
+  #tanh_estimator, divide_by_max, quantize
+  normalization_type: divide_by_max
+  # scaling factor for normalization_type quantize
+  # qx = [(2^n - 1)/2] / abs(max(x)) where n is 8 or 16 (int8 or int16)
+  quantization_scale: 32767.5
+  distance: 1
+  observation_age: 0
+  voltage: 0
+  current: 1
+  # only include current if the value is more than this - !!! for reward calculation !!!
+  current_cut_off: 4
+  current_per_leg: 1
+  time_delta: 0
+  useIMUForYaw: 0
+  yaw: 1
+  yaw_delta: 0
+  roll: 1
+  pitch: 1
+
+  acc_z: 1
+
+
+reward:
+  # euclidean or x-direction
+  # euclidean was used for real-world testing for the QuaidQuant paper
+  # reward_type: euclidean
+  reward_type: x-direction
+  # negative for going backwards
+  distance_reward_ratio: 1.0
+  speed_reward_ratio: 2.0
+  target_distance_per_step: 0.6
+  # yaw_delta is around 0.03
+  yaw_delta_reward_ratio: 0.0
+  # using exp(-abs(yaw)) to reward the smaller yaw, rather than penalize the deviation
+  yaw_reward_ratio: 0.5
+  # it's hacking the reward by pitching down and measuring distance from the table
+  pitch_reward_ratio: -0.1
+  roll_reward_ratio: -0.1
+
+  #current_reward_ratio: -0.005
+  current_reward_ratio: 0.1
+
+  z_center: 1.6
+  z_reward_ratio: 0.0
+
+  acc_z_reward_ratio: -0.025
+  acc_x_reward_ratio: -0.025
+  acc_y_reward_ratio: -0.025
+  # for positive reward
+#  acc_z_reward_ratio: 1.0
+
+  current_per_leg_ratio: -0.005
+
+  action_smoothness_reward_ratio: -0.025
+
+sim:
+  sensor_noise: "1.05,0.05"
