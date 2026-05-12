@@ -11,6 +11,7 @@ import numpy as np
 from runner import OnnxRnnPolicyRunner
 from stats import InferenceStats
 from preprocessor import AddActionsPreprocessor
+from comparator import Comparator
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +62,10 @@ class ComparatorPlayer:
         self._action_dim = int(np.prod(env.action_space.shape))
         self._obs_dim = int(np.prod(env.observation_space.shape))
 
-        # Load the initial policy and policy configurations
+        # Load the comparator configurations
         self.initial_policy = comparator_config["initial_policy"]
         self.policy_configs = comparator_config["policies"]
+        self.comparator_assets_dir = comparator_config["comparator_assets_dir"]
 
         # Build the policy runners
         self.policy_runners = self._build_policy_runners()
@@ -75,3 +77,46 @@ class ComparatorPlayer:
         self.preprocessor = AddActionsPreprocessor(action_dim=self._action_dim)
 
         self.stats = InferenceStats(output_dir=output_dir)
+
+
+    def _build_policy_runners(self) -> dict[str, OnnxRnnPolicyRunner]:
+        """
+        Build one stateless ONNX recurrent policy runner for each configured policy.
+        """
+
+        if not self.policy_configs:
+            raise ValueError("Comparator config does not define any policies.")
+
+        policy_runners = {}
+
+        for policy_name, policy_config in self.policy_configs.items():
+
+            if "model_path" not in policy_config:
+                raise KeyError(f"Policy '{policy_name}' is missing required key 'model_path'.")
+
+            # Extract the model path from the policy configuration
+            model_path = policy_config["model_path"]
+
+            # Build the policy runner based on the model path
+            policy_runners[policy_name] = OnnxRnnPolicyRunner(
+                model_path=model_path,
+                rnn_layers=self.policy_rnn_layers,
+                rnn_hidden_size=self.policy_rnn_hidden_size,
+            )
+
+        if self.initial_policy not in policy_runners:
+            raise ValueError(
+                f"Initial policy '{self.initial_policy}' is not defined in comparator policies."
+            )
+
+        return policy_runners
+
+    
+    def _build_comparator(self) -> Comparator:
+        """
+        Build the runtime comparator from the configured asset directory.
+        """
+        return Comparator(
+            comparator_assets_dir=self.comparator_assets_dir,
+            providers=["CPUExecutionProvider"],
+        )

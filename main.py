@@ -149,14 +149,14 @@ def get_args(argv=None) -> argparse.Namespace:
         if args.model is None:
             parser.error("--model is required when --mode single is used.")
 
-        if args.policy_config is not None:
+        if args.comparator_config is not None:
             parser.error(
                 "--policy-config should only be used with --mode comparator."
             )
 
     elif args.mode == "comparator":
 
-        if args.policy_config is None:
+        if args.comparator_config is None:
             parser.error(
                 "--policy-config is required when --mode comparator is used."
             )
