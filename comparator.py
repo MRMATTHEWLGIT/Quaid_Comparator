@@ -8,12 +8,78 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 import onnxruntime as ort
+from sklearn.neighbors import NearestNeighbors
 
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ComparatorLookupTable:
+    """
+    Precomputed local statistics for each historical comparator database point.
+
+    All arrays are aligned to database row indices.
+    """
+
+    ordered_conditions: np.ndarray
+    neighbour_indices: np.ndarray
+    local_condition_distributions: np.ndarray
+    local_reward_mean: np.ndarray
+    nearest_neighbour_index: NearestNeighbors
+
+
+@dataclass
+class QueryStatistics:
+    """
+    Comparator-visible statistics for one live query point.
+
+    The query is embedded using the runtime GRU encoder, projected into the
+    fixed UMAP space, and compared against the historical comparator database.
+    """
+
+    query_embedding: np.ndarray
+    query_embedding_2d: np.ndarray
+    query_policy: str
+    query_step: int
+    local_condition_distribution: np.ndarray
+    local_reward_mean: float
+    neighbour_indices: np.ndarray
+
+
+@dataclass
+class CandidateMaskResult:
+    """
+    Candidate filtering result aligned to database row indices.
+    """
+
+    candidate_mask: np.ndarray
+    counts: dict[str, int]
+    distribution_overlap: Optional[np.ndarray] = None
+
+
+@dataclass
+class CandidateScores:
+    """
+    Candidate scoring result aligned to the filtered candidate list.
+    """
+
+    candidate_indices: np.ndarray
+
+    overlap_values: np.ndarray
+    pairwise_values: np.ndarray
+    local_reward_values: np.ndarray
+
+    overlap_score: np.ndarray
+    pairwise_score: np.ndarray
+    local_reward_score: np.ndarray
+
+    total_score: np.ndarray
 
 
 class Comparator:
@@ -37,6 +103,8 @@ class Comparator:
         self,
         comparator_assets_dir: str,
         *,
+        comparator_hyperparameters: dict,
+        valid_policy_keys: Optional[set[str]] = None,
         providers: Optional[list[str]] = None,
     ) -> None:
 
@@ -55,6 +123,45 @@ class Comparator:
 
         # Use CPU by default for Raspberry Pi friendly deployment
         self.providers = providers or ["CPUExecutionProvider"]
+
+        # Store the comparator hyperparameters
+        self.k_signature = int(comparator_hyperparameters.get("k_signature", 50))
+        self.k_reward = int(comparator_hyperparameters.get("k_reward", 50))
+        self.sequence_length = int(comparator_hyperparameters.get("sequence_length", 99))
+        self.min_reward_gain_percent = float(comparator_hyperparameters.get("min_reward_gain_percent", 0.0))
+        self.min_distribution_overlap = comparator_hyperparameters.get("min_distribution_overlap", None)
+        
+        # Store scoring hyperparameters
+        self.overlap_weight = float(comparator_hyperparameters.get("overlap_weight", 1.0))
+        self.pairwise_weight = float(comparator_hyperparameters.get("pairwise_weight", 0.5))
+        self.local_reward_weight = float(comparator_hyperparameters.get("local_reward_weight", 1.0))
+
+        if self.k_signature <= 0:
+            raise ValueError("k_signature must be greater than zero.")
+
+        if self.k_reward <= 0:
+            raise ValueError("k_reward must be greater than zero.")
+
+        if self.sequence_length <= 0:
+            raise ValueError("sequence_length must be greater than zero.")
+
+        if self.min_reward_gain_percent < 0.0:
+            raise ValueError("min_reward_gain_percent must be greater than or equal to zero.")
+
+        if self.min_distribution_overlap is not None and (self.min_distribution_overlap < 0.0 or self.min_distribution_overlap > 1.0):
+            raise ValueError("min_distribution_overlap must be between 0.0 and 1.0.")
+
+        if self.overlap_weight < 0.0:
+            raise ValueError("overlap_weight must be greater than or equal to zero.")
+
+        if self.pairwise_weight < 0.0:
+            raise ValueError("pairwise_weight must be greater than or equal to zero.")
+
+        if self.local_reward_weight < 0.0:
+            raise ValueError("local_reward_weight must be greater than or equal to zero.")
+
+        # Store the set of valid policy keys
+        self.valid_policy_keys = set(valid_policy_keys or [])
 
         # Build expected asset paths
         self.gru_onnx_path = self.assets_dir / self.GRU_ONNX_NAME
@@ -80,6 +187,12 @@ class Comparator:
         # Define the mean and standard deviation of the GRU input features
         self.X_mean = np.asarray(self.gru_stats["X_mean"], dtype=np.float32)
         self.X_std = np.asarray(self.gru_stats["X_std"], dtype=np.float32)
+
+        # Determine expected GRU input shape from saved normalisation stats
+        self.input_dim = int(np.prod(self.X_mean.shape[-1:]))
+
+        # Live query history stores obs_t + action_t states for the embedding GRU
+        self.query_history = deque(maxlen=self.sequence_length)
 
         # Load historical comparator database
         self.database = np.load(self.database_path, allow_pickle=True)
@@ -111,6 +224,25 @@ class Comparator:
 
         if len(self.terrains) != n_points:
             raise ValueError("Terrain array size mismatch.")
+
+        # Build readable labels from terrain IDs
+        self._build_database_labels()
+
+        # Validate the policy keys in the database
+        if self.valid_policy_keys:
+            unknown_policy_keys = sorted(
+                set(str(policy_key) for policy_key in self.policy_keys)
+                - self.valid_policy_keys
+            )
+
+            if unknown_policy_keys:
+                raise ValueError(
+                    f"Comparator database contains unknown policy keys: {unknown_policy_keys}"
+                )
+
+        # Build precomputed nearest-neighbour lookup table
+        self.lookup_table = self._build_lookup_table(k_signature=self.k_signature, 
+                k_reward=self.k_reward)
 
         # Load ONNX GRU embedding encoder
         log.info("Loading embedding GRU encoder: %s", self.gru_onnx_path)
@@ -188,3 +320,763 @@ class Comparator:
             "No UMAP projection model found. Expected either "
             f"{self.parametric_umap_path.name} or {self.standard_umap_path.name}."
         )
+
+    def _terrain_name_from_id(
+        self,
+        terrain_id: int,
+        idx_to_terrain: dict,
+    ) -> str:
+        """
+        Convert a terrain ID into its saved terrain name.
+        """
+
+        terrain_key = str(int(terrain_id))
+
+        if terrain_key not in idx_to_terrain:
+            raise KeyError(f"Terrain ID {terrain_id} was not found in idx_to_terrain.")
+
+        return str(idx_to_terrain[terrain_key])
+
+
+    def _condition_name_from_terrain_name(self, terrain_name: str) -> str:
+        """
+        Extract the condition name from a terrain name.
+        """
+
+        terrain_name = str(terrain_name).lower().strip()
+
+        if "-" not in terrain_name:
+            raise ValueError(f"Could not determine condition name from terrain name: {terrain_name}")
+
+        condition_name = terrain_name.rsplit("-", maxsplit=1)[-1]
+
+        if condition_name in {"mat", "ramp4", "ramp8"}:
+            return condition_name
+
+        raise ValueError(f"Unknown condition name from terrain name: {terrain_name}")
+
+
+    def _policy_key_from_terrain_name(self, terrain_name: str) -> str:
+        """
+        Extract the runtime policy key from a terrain name.
+        """
+
+        terrain_name = str(terrain_name).lower().strip()
+
+        policy_part = terrain_name.split("+", maxsplit=1)[0]
+
+        if policy_part in {"flat", "ramp", "uneven"}:
+            return policy_part
+
+        raise ValueError(f"Could not determine policy key from terrain name: {terrain_name}")
+
+
+    def _build_database_labels(self) -> None:
+        """
+        Build readable terrain, condition, and policy labels for each database point.
+        """
+
+        # Extract the terrain ID to terrain-name mapping from metadata
+        idx_to_terrain = self.metadata["idx_to_terrain"]
+
+        # Convert terrain IDs into terrain names
+        self.terrain_names = np.array(
+            [self._terrain_name_from_id(terrain_id, idx_to_terrain)
+                for terrain_id in self.terrains
+            ],
+            dtype=object,
+        )
+
+        # Convert terrain names into condition names
+        self.condition_names = np.array(
+            [
+                self._condition_name_from_terrain_name(terrain_name)
+                for terrain_name in self.terrain_names
+            ],
+            dtype=object,
+        )
+
+        # Convert terrain names into policy keys
+        self.policy_keys = np.array(
+            [
+                self._policy_key_from_terrain_name(terrain_name)
+                for terrain_name in self.terrain_names
+            ],
+            dtype=object,
+        )
+
+        log.info(
+            "Comparator policy keys found in database: %s",
+            sorted(set(str(policy_key) for policy_key in self.policy_keys)),
+        )
+
+        log.info(
+            "Comparator condition names found in database: %s",
+            sorted(set(str(condition_name) for condition_name in self.condition_names)),
+        )
+
+    def _distribution_from_conditions(self,
+        condition_values: np.ndarray,
+        ordered_conditions: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Build a probability distribution over the ordered condition list.
+        """
+
+        distribution = np.zeros(len(ordered_conditions), dtype=np.float64)
+
+        # Map condition names to their positions in the neighbour list
+        condition_to_position = {
+            str(condition_name): position
+            for position, condition_name in enumerate(ordered_conditions)
+        }
+
+        # Count the number of times each condition appears in the neighbour list
+        for condition_value in condition_values:
+            position = condition_to_position.get(str(condition_value))
+            if position is not None:
+                distribution[position] += 1.0
+
+        # Sum each value in the distribution to get a total
+        total = float(distribution.sum())
+        if total > 0.0:
+            distribution /= total
+
+        return distribution
+
+    
+    def _build_lookup_table(self, *, k_signature: int = 50, k_reward: int = 50) -> ComparatorLookupTable:
+        """
+        Precompute local neighbour statistics for every database point.
+
+        This avoids recomputing local condition distributions and local reward
+        means during runtime inference.
+        """
+
+        n_points = len(self.umap_embeddings)
+
+        if n_points == 0:
+            raise ValueError("Cannot build comparator lookup table with zero database points.")
+
+        # Get a stable ordered list of known condition names
+        ordered_conditions = np.array(
+            sorted(np.unique(self.condition_names).astype(str)),
+            dtype=object,
+        )
+
+        n_conditions = len(ordered_conditions)
+
+        # Neighbour count includes the point itself, which is removed later
+        neighbour_count = min(max(k_signature, k_reward, 1) + 1, n_points)
+
+        # Fit nearest-neighbour index over the saved 2D UMAP database
+        nearest_neighbour_index = NearestNeighbors(
+            n_neighbors=neighbour_count,
+            metric="euclidean",
+        )
+
+        # Fit the nearest-neighbour index over the saved 2D UMAP database
+        nearest_neighbour_index.fit(self.umap_embeddings)
+
+        # Query neighbours for every database point
+        _, neighbour_indices_full = nearest_neighbour_index.kneighbors(
+            self.umap_embeddings,
+            n_neighbors=neighbour_count,
+            return_distance=True,
+        )
+
+        # Store fixed-size neighbour indices excluding the point itself
+        max_k = max(k_signature, k_reward, 1)
+        neighbour_indices = np.full((n_points, max_k), -1, dtype=np.int64)
+
+        # Preallocate local condition distributions
+        local_condition_distributions = np.zeros(
+            (n_points, n_conditions),
+            dtype=np.float64,
+        )
+
+        # Preallocate local reward means
+        local_reward_mean = np.zeros(n_points, dtype=np.float64)
+
+        # Build the lookup table
+        for point_idx in range(n_points):
+
+            # Remove the current point from its own neighbour list
+            neighbours = neighbour_indices_full[point_idx]
+            neighbours = neighbours[neighbours != point_idx]
+
+            # Fallback for tiny databases
+            if len(neighbours) == 0:
+                neighbours = np.array([point_idx], dtype=np.int64)
+
+            # Store up to max_k neighbours in the lookup table
+            stored_neighbours = neighbours[:max_k]
+            neighbour_indices[point_idx, :len(stored_neighbours)] = stored_neighbours
+
+            # Use K_SIGNATURE neighbours for local condition distribution
+            signature_neighbours = neighbours[:k_signature]
+
+            if len(signature_neighbours) == 0:
+                signature_neighbours = np.array([point_idx], dtype=np.int64)
+
+            # Build the local condition distribution for current point
+            local_condition_distributions[point_idx] = self._distribution_from_conditions(
+                self.condition_names[signature_neighbours],
+                ordered_conditions,
+            )
+
+            # Use K_REWARD neighbours for local reward mean
+            reward_neighbours = neighbours[:k_reward]
+
+            if len(reward_neighbours) == 0:
+                reward_neighbours = np.array([point_idx], dtype=np.int64)
+
+            # Calculate the local reward mean for current point
+            local_reward_mean[point_idx] = float(
+                np.mean(self.rewards[reward_neighbours], dtype=np.float64)
+            )
+
+        return ComparatorLookupTable(
+            ordered_conditions=ordered_conditions,
+            neighbour_indices=neighbour_indices,
+            local_condition_distributions=local_condition_distributions,
+            local_reward_mean=local_reward_mean,
+            nearest_neighbour_index=nearest_neighbour_index,
+        )
+
+    @staticmethod
+    def minmax_normalize(
+        values: np.ndarray,
+        valid_mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Normalize values to [0, 1] while safely handling invalid entries.
+        """
+
+        # Convert to consistent format
+        values = np.asarray(values, dtype=np.float64)
+
+        # Output array initialised to 0
+        normalized = np.zeros(values.shape, dtype=np.float64)
+
+        # No mask provided so only keep finite values
+        if valid_mask is None:
+            valid_mask = np.isfinite(values)
+
+        # valid_mask = valid_mask AND finite values
+        # So only keep valid finite values
+        else:
+            valid_mask = np.asarray(valid_mask, dtype=bool) & np.isfinite(values)
+
+        # No valid values
+        if not np.any(valid_mask):
+            return normalized
+
+        # Extract all valid values
+        valid_values = values[valid_mask]
+
+        # Determine the min, max and range of the valid values
+        min_value = float(np.min(valid_values))
+        max_value = float(np.max(valid_values))
+        value_range = max_value - min_value
+
+        # Range is too small, so all candidates are equally best
+        if value_range <= 1e-12:
+            normalized[valid_mask] = 1.0
+
+        # Normalise using min-max scaling
+        else:
+            normalized[valid_mask] = (valid_values - min_value) / value_range
+
+        return normalized
+
+    @staticmethod
+    def distribution_overlap(
+        query_distribution: np.ndarray,
+        candidate_distributions: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Compute sum(min(p_i, q_i)) overlap between query and candidates.
+        """
+
+        # Ensure the distributions are numpy arrays
+        query_distribution = np.asarray(query_distribution, dtype=np.float64)
+        candidate_distributions = np.asarray(candidate_distributions, dtype=np.float64)
+
+        if candidate_distributions.ndim == 1:
+            candidate_distributions = candidate_distributions.reshape(1, -1)
+
+        # Calculate the overlap score between the query and candidate distributions
+        return np.sum(
+            np.minimum(candidate_distributions, query_distribution.reshape(1, -1)),
+            axis=1,
+        )
+
+    @staticmethod
+    def pairwise_distribution_agreement(
+        query_distribution: np.ndarray,
+        candidate_distributions: np.ndarray,
+        tolerance: float = 1e-12,
+    ) -> np.ndarray:
+        """
+        Measure whether candidate condition ranking matches the query ranking.
+        """
+
+        # Ensure the distributions are numpy arrays
+        query_distribution = np.asarray(query_distribution, dtype=np.float64)
+        candidate_distributions = np.asarray(candidate_distributions, dtype=np.float64)
+
+        if candidate_distributions.ndim == 1:
+            candidate_distributions = candidate_distributions.reshape(1, -1)
+
+        # Determine how many conditions in the query distribution
+        n_conditions = len(query_distribution)
+
+        # Initialise all scores to 1.0
+        scores = np.ones(len(candidate_distributions), dtype=np.float64)
+
+        # Not enough conditions to have meaningful pairwise agreement
+        if n_conditions < 2:
+            return scores
+
+        # Loop over each candidate point distribution
+        for candidate_position, candidate_distribution in enumerate(candidate_distributions):
+
+            agreements = 0
+            total_pairs = 0
+
+            # Generate all unique pairs for this candidate distribution
+            for first_position in range(n_conditions):
+                for second_position in range(first_position + 1, n_conditions):
+
+                    # Compare query ordering for this pair
+                    query_difference = (
+                        query_distribution[first_position]
+                        - query_distribution[second_position]
+                    )
+
+                    # Compare candidate ordering for this pair
+                    candidate_difference = (
+                        candidate_distribution[first_position]
+                        - candidate_distribution[second_position]
+                    )
+
+                    # Determine query order for this pair
+                    query_sign = 0
+                    if abs(query_difference) > tolerance:
+                        query_sign = 1 if query_difference > 0 else -1
+
+                    # Determine candidate order for this pair
+                    candidate_sign = 0
+                    if abs(candidate_difference) > tolerance:
+                        candidate_sign = 1 if candidate_difference > 0 else -1
+
+                    # If the query and candidate pair ordering agree, count the result
+                    if query_sign == candidate_sign:
+                        agreements += 1
+
+                    total_pairs += 1
+
+            # Calculate the pairwise agreement for this candidate distribution vs query
+            scores[candidate_position] = (
+                agreements / total_pairs
+                if total_pairs
+                else 1.0
+            )
+
+        return scores
+
+    @staticmethod
+    def safe_argmax(
+        scores: np.ndarray,
+        valid_mask: np.ndarray,
+    ) -> Optional[int]:
+        """
+        Return the best valid index, or None when no valid candidates exist.
+        """
+
+        # Ensure scores are numpy array
+        scores = np.asarray(scores, dtype=np.float64)
+
+        # Generate a mask with all valid finite scores
+        valid_mask = np.asarray(valid_mask, dtype=bool) & np.isfinite(scores)
+
+        # No valid finite entries exist
+        if not np.any(valid_mask):
+            return None
+
+        # Ensures invalid entries are not counted by argmax
+        masked_scores = np.where(valid_mask, scores, -np.inf)
+
+        # Index of the highest valid score
+        return int(np.argmax(masked_scores))
+
+
+    def _normalise_query_sequence(self) -> np.ndarray:
+        """
+        Build and normalise the current live query sequence.
+        """
+
+        if not self.has_enough_history():
+            raise ValueError(
+                f"Comparator needs {self.sequence_length} states before inference, "
+                f"but only has {len(self.query_history)}."
+            )
+
+        # Stack recent obs_t + action_t states into [sequence_length, input_dim]
+        sequence = np.stack(list(self.query_history), axis=0).astype(np.float32)
+
+        # Normalise using saved GRU statistics
+        sequence = (sequence - self.X_mean) / (self.X_std + 1e-8)
+
+        # Add batch dimension for ONNX GRU encoder
+        return sequence.reshape(1, self.sequence_length, self.input_dim).astype(np.float32)
+
+    
+    def _embed_query_sequence(self) -> np.ndarray:
+        """
+        Embed the current live query sequence using the ONNX GRU encoder.
+        """
+
+        # Build normalised GRU input
+        sequence = self._normalise_query_sequence()
+
+        # Run embedding GRU ONNX inference
+        embedding = self.gru_session.run(
+            [self.gru_output_name],
+            {self.gru_input_name: sequence},
+        )[0]
+
+        return np.asarray(embedding, dtype=np.float32).reshape(-1)
+
+
+    def _project_query_embedding(self, embedding: np.ndarray) -> np.ndarray:
+        """
+        Project one GRU embedding into the fixed UMAP space.
+        """
+
+        embedding = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+
+        # Parametric UMAP ONNX path
+        if self.umap_session is not None:
+            embedding_2d = self.umap_session.run(
+                [self.umap_output_name],
+                {self.umap_input_name: embedding},
+            )[0]
+
+        # Standard UMAP pickle path
+        else:
+            embedding_2d = self.umap_model.transform(embedding)
+
+        return np.asarray(embedding_2d, dtype=np.float64).reshape(-1)
+
+
+    # -----------------------------------------------------------------------
+    # Runtime inference methods
+    # -----------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """
+        Reset live comparator query history at the start of an episode.
+        """
+        self.query_history.clear()
+
+
+    def update_query_history(self, state: np.ndarray) -> None:
+        """
+        Add one obs_t + action_t state to the live comparator history.
+        """
+
+        # Convert to consistent runtime format
+        state = np.asarray(state, dtype=np.float32).reshape(-1)
+
+        if state.shape[0] != self.input_dim:
+            raise ValueError(
+                f"Comparator state has incorrect size. Expected {self.input_dim}, "
+                f"got {state.shape[0]}."
+            )
+
+        self.query_history.append(state)
+
+    
+    def has_enough_history(self) -> bool:
+        """
+        Return whether the live query history is long enough for GRU inference.
+        """
+        return len(self.query_history) >= self.sequence_length
+
+
+    def compute_query_statistics(
+        self,
+        *,
+        current_policy: str,
+        step: int,
+    ) -> Optional[QueryStatistics]:
+        """
+        Compute Comparator-visible query statistics.
+
+        The query is transformed into the fixed historical UMAP space. The query is
+        not used to fit the UMAP or update the memory nearest-neighbour model.
+        """
+
+        # Not enough live history yet to build a full GRU sequence
+        if not self.has_enough_history():
+            return None
+
+        # Embed the live obs_t + action_t sequence using the runtime GRU
+        query_embedding = self._embed_query_sequence()
+
+        # Transform the query point into the fixed 2D UMAP space
+        query_embedding_2d = self._project_query_embedding(query_embedding)
+
+        # Set the number of neighbours for the memory space per point
+        neighbour_count = min(
+            max(self.k_signature, self.k_reward, 1),
+            len(self.umap_embeddings),
+        )
+
+        # Determine all neighbours within the 2D space around the transformed query point
+        neighbour_indices = self.lookup_table.nearest_neighbour_index.kneighbors(
+            query_embedding_2d.reshape(1, -1),
+            n_neighbors=neighbour_count,
+            return_distance=False,
+        )[0]
+
+        # Define all the neighbours for both distribution signature and reward calculations
+        signature_neighbours = neighbour_indices[:self.k_signature]
+        reward_neighbours = neighbour_indices[:self.k_reward]
+
+        # Calculate the neighbourhood distribution around the query point
+        local_condition_distribution = self._distribution_from_conditions(
+            self.condition_names[signature_neighbours],
+            self.lookup_table.ordered_conditions,
+        )
+
+        # Calculate the local neighbourhood reward mean around the query point
+        local_reward_mean = float(np.mean(self.rewards[reward_neighbours]))
+
+        # Create the QueryStatistics and return it
+        return QueryStatistics(
+            query_embedding=np.asarray(query_embedding, dtype=np.float32),
+            query_embedding_2d=np.asarray(query_embedding_2d, dtype=np.float64),
+            query_policy=str(current_policy),
+            query_step=int(step),
+            local_condition_distribution=local_condition_distribution,
+            local_reward_mean=local_reward_mean,
+            neighbour_indices=np.asarray(neighbour_indices, dtype=np.int64),
+        )
+
+
+    def build_candidate_mask(
+        self,
+        query_stats: QueryStatistics,
+    ) -> CandidateMaskResult:
+        """
+        Build the candidate mask for Comparator policy selection.
+        """
+
+        # Debugger to store candidate counts after each filter stage
+        counts = {}
+
+        # The initial starting amount of memory points
+        n_memory_points = len(self.umap_embeddings)
+
+        # Set-up mask and store initial count of points
+        candidate_mask = np.ones(n_memory_points, dtype=bool)
+        counts["all_memory_points"] = int(candidate_mask.sum())
+
+        # Set-up mask to allow only points not of the same policy as the query
+        candidate_mask &= self.policy_keys != query_stats.query_policy
+        counts["after_different_policy"] = int(candidate_mask.sum())
+
+        # Calculate the reward margin for the query
+        reward_margin = abs(query_stats.local_reward_mean) * (
+            self.min_reward_gain_percent / 100.0
+        )
+
+        # Set-up mask to allow only points that have a local reward mean greater
+        # than or equal to the query
+        candidate_mask &= (
+            self.lookup_table.local_reward_mean
+            >= query_stats.local_reward_mean + reward_margin
+        )
+        counts["after_reward_filter"] = int(candidate_mask.sum())
+
+        distribution_overlap = None
+
+        # Optional minimum distribution overlap filter
+        if self.min_distribution_overlap is not None:
+
+            # Calculate the overlap between the query and memory points
+            distribution_overlap = self.distribution_overlap(
+                query_stats.local_condition_distribution,
+                self.lookup_table.local_condition_distributions,
+            )
+
+            # Apply the minimum distribution overlap filter
+            candidate_mask &= distribution_overlap >= float(self.min_distribution_overlap)
+            counts["after_distribution_overlap_filter"] = int(candidate_mask.sum())
+
+        return CandidateMaskResult(
+            candidate_mask=candidate_mask,
+            counts=counts,
+            distribution_overlap=distribution_overlap,
+        )
+
+    def score_candidates(
+        self,
+        query_stats: QueryStatistics,
+        candidate_mask: np.ndarray,
+    ) -> CandidateScores:
+        """
+        Score all candidates using the runtime Comparator scoring formula.
+        """
+
+        # Get the database indices of the candidate points
+        candidate_indices = np.where(candidate_mask)[0]
+
+        # No valid candidates exist, so return empty scores
+        if len(candidate_indices) == 0:
+            empty = np.array([], dtype=np.float64)
+
+            return CandidateScores(
+                candidate_indices=candidate_indices,
+                overlap_values=empty,
+                pairwise_values=empty,
+                local_reward_values=empty,
+                overlap_score=empty,
+                pairwise_score=empty,
+                local_reward_score=empty,
+                total_score=empty,
+            )
+
+        # Get the local condition distributions of the candidate points
+        candidate_distributions = (
+            self.lookup_table.local_condition_distributions[candidate_indices]
+        )
+
+        # Calculate the overlap score between the query and candidate distributions
+        overlap_score = self.distribution_overlap(
+            query_stats.local_condition_distribution,
+            candidate_distributions,
+        )
+
+        # Calculate the pairwise distribution agreement between the query and candidate distributions
+        pairwise_score = self.pairwise_distribution_agreement(
+            query_stats.local_condition_distribution,
+            candidate_distributions,
+        )
+
+        # Get the local reward values of the candidate points
+        local_reward_values = self.lookup_table.local_reward_mean[candidate_indices]
+
+        # Normalise the local reward score to between [0, 1]
+        local_reward_score = self.minmax_normalize(local_reward_values)
+
+        # Calculate the total score for the candidate points
+        total_score = (
+            self.overlap_weight * overlap_score
+            + self.pairwise_weight * pairwise_score
+            + self.local_reward_weight * local_reward_score
+        )
+
+        # Create and return the candidate scores
+        return CandidateScores(
+            candidate_indices=np.asarray(candidate_indices, dtype=np.int64),
+            overlap_values=np.asarray(overlap_score, dtype=np.float64),
+            pairwise_values=np.asarray(pairwise_score, dtype=np.float64),
+            local_reward_values=np.asarray(local_reward_values, dtype=np.float64),
+            overlap_score=np.asarray(overlap_score, dtype=np.float64),
+            pairwise_score=np.asarray(pairwise_score, dtype=np.float64),
+            local_reward_score=np.asarray(local_reward_score, dtype=np.float64),
+            total_score=np.asarray(total_score, dtype=np.float64),
+        )
+
+    def select_policy(
+        self,
+        *,
+        current_policy: str,
+        step: int,
+    ) -> str:
+        """
+        Select the policy to use at the next timestep.
+
+        The comparator:
+        1. embeds the live obs_t + action_t history,
+        2. projects the query into UMAP space,
+        3. computes query-local statistics,
+        4. builds a candidate mask,
+        5. scores valid candidate points,
+        6. returns the policy key of the best candidate.
+
+        If the comparator cannot make a valid decision, the current policy is kept.
+        """
+
+        # Compute the live query statistics from the current history buffer
+        query_stats = self.compute_query_statistics(
+            current_policy=current_policy,
+            step=step,
+        )
+
+        # Not enough history yet, so keep using the current policy
+        if query_stats is None:
+            return current_policy
+
+        # Build the candidate mask based on query-vs-memory criteria
+        candidate_mask_result = self.build_candidate_mask(query_stats)
+
+        # Score all valid candidate points
+        candidate_scores = self.score_candidates(
+            query_stats=query_stats,
+            candidate_mask=candidate_mask_result.candidate_mask,
+        )
+
+        # No valid candidates exist, so keep using the current policy
+        if len(candidate_scores.total_score) == 0:
+            log.debug(
+                "Comparator step=%d current=%s no valid candidates counts=%s",
+                step,
+                current_policy,
+                candidate_mask_result.counts,
+            )
+
+            return current_policy
+
+        # Every returned candidate score is valid at this stage
+        valid_score_mask = np.ones(len(candidate_scores.total_score), dtype=bool)
+
+        # Select the best valid candidate score
+        best_position = self.safe_argmax(
+            candidate_scores.total_score,
+            valid_score_mask,
+        )
+
+        # No best candidate found, so keep using the current policy
+        if best_position is None:
+            return current_policy
+
+        # Convert from filtered candidate-list position to database row index
+        best_candidate_idx = int(candidate_scores.candidate_indices[best_position])
+
+        # Read the policy key associated with the selected historical candidate
+        next_policy = str(self.policy_keys[best_candidate_idx])
+
+        log.debug(
+            "Comparator step=%d current=%s next=%s candidates=%d best_idx=%d "
+            "best_score=%.4f counts=%s",
+            step,
+            current_policy,
+            next_policy,
+            len(candidate_scores.total_score),
+            best_candidate_idx,
+            float(candidate_scores.total_score[best_position]),
+            candidate_mask_result.counts,
+        )
+
+        return next_policy
+
+
+    def close(self) -> None:
+        """Release comparator ONNX sessions."""
+        self.gru_session = None
+        self.umap_session = None

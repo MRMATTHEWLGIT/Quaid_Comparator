@@ -95,3 +95,8 @@ class OnnxRnnPolicyRunner():
         next_h_t = np.asarray(next_h_t, dtype=np.float32)
 
         return action, next_h_t
+
+
+    def close(self) -> None:
+        """Release the ONNX inference session."""
+        self._session = None

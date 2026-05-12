@@ -282,6 +282,14 @@ def main(argv=None) -> int:
             embedding_gru_hidden_size=args.embedding_gru_hidden_size,
         )
 
+        # Run the comparator player
+        try:
+            comparator_player.play()
+            comparator_player.stats.print_summary()
+        finally:
+            comparator_player.close()
+            env.close()
+
 
     # Single policy mode
     elif args.mode == "single":
