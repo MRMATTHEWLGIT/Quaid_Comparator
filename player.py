@@ -68,6 +68,9 @@ class ComparatorPlayer:
         self.comparator_assets_dir = comparator_config["comparator_assets_dir"]
         self.comparator_hyperparameters = comparator_config["hyperparameters"]
 
+        # Store the minimum interval between policy switches
+        self.min_switch_interval = int(comparator_config["hyperparameters"].get("min_switch_interval", 10))
+
         # Build the policy runners
         self.policy_runners = self._build_policy_runners()
 
@@ -158,6 +161,9 @@ class ComparatorPlayer:
             # Start from the configured initial policy
             current_policy = self.initial_policy
 
+            # Track when the last accepted policy switch occurred
+            last_switch_step = -10_000
+
             episode_reward = 0.0
             episode_start = time.perf_counter()
             inference_times: list[int] = []
@@ -216,10 +222,13 @@ class ComparatorPlayer:
                 # Policy switch commit block
                 # ------------------------------------------------------------------
 
-                previous_policy = current_policy
-                current_policy = next_policy
+                can_switch = (step - last_switch_step) >= self.min_switch_interval
 
-                if previous_policy != current_policy:
+                if next_policy != current_policy and can_switch:
+                    previous_policy = current_policy
+                    current_policy = next_policy
+                    last_switch_step = step
+
                     log.info(
                         "Comparator switched policy at episode=%d step=%d: %s -> %s",
                         episode_no + 1,

@@ -33,3 +33,6 @@ hyperparameters:
   overlap_weight: 1.0
   pairwise_weight: 0.5
   local_reward_weight: 1.0
+
+  # Minimum interval/timesteps between policy switches
+  min_switch_interval: 10
