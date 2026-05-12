@@ -34,9 +34,11 @@ import argparse
 import logging
 import re
 import sys
+import yaml
 import time
 from pathlib import Path
 from quaid_env import QuaidEnv, load_settings
+from player import ComparatorPlayer
 
 
 def get_args(argv=None) -> argparse.Namespace:
@@ -57,7 +59,8 @@ def get_args(argv=None) -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--policy-config",
+        "--comparator-config",
+        default="config/comparator.yaml",
         help="YAML file describing all policies used by comparator mode."
     )
 
@@ -98,9 +101,11 @@ def get_args(argv=None) -> argparse.Namespace:
         help="Optional extra sleep between steps."
     )
 
-    parser.add_argument("--rnn-layers", type=int, default=3)
+    parser.add_argument("--policy-rnn-layers", type=int, default=3)
+    parser.add_argument("--policy-rnn-hidden-size", type=int, default=64)
 
-    parser.add_argument("--rnn-hidden-size", type=int, default=64)
+    parser.add_argument("--embedding-gru-layers", type=int, default=1)
+    parser.add_argument("--embedding-gru-hidden-size", type=int, default=64)
 
     parser.add_argument(
         "--output-root",
@@ -252,6 +257,35 @@ def main(argv=None) -> int:
     # Setup the SQLite logger if requested
     if not args.no_logger:
         env.setup_logger(run_dir / f"Quaid_{timestamp}.sqlite")
+
+
+    comparator_config = None
+
+    # Comparator mode
+    if args.mode == "comparator":
+
+        # Load the comparator configuration
+        with open(args.comparator_config, "r", encoding="utf-8") as file:
+            comparator_config = yaml.safe_load(file)
+
+        # Create the comparator player
+        comparator_player = ComparatorPlayer(
+            env=env,
+            comparator_config=comparator_config,
+            output_dir=run_dir,
+            test_episodes=args.episodes,
+            max_test_steps=args.max_steps,
+            test_step_delay_ms=args.step_delay_ms,
+            policy_rnn_layers=args.policy_rnn_layers,
+            policy_rnn_hidden_size=args.policy_rnn_hidden_size,
+            embedding_gru_layers=args.embedding_gru_layers,
+            embedding_gru_hidden_size=args.embedding_gru_hidden_size,
+        )
+
+
+    # Single policy mode
+    elif args.mode == "single":
+        pass
 
     return 0
 
