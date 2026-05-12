@@ -15,6 +15,8 @@ import numpy as np
 import onnxruntime as ort
 from sklearn.neighbors import NearestNeighbors
 
+from stats import ComparatorStepInfo
+
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +241,8 @@ class Comparator:
                 raise ValueError(
                     f"Comparator database contains unknown policy keys: {unknown_policy_keys}"
                 )
+
+        self.last_step_info = None
 
         # Build precomputed nearest-neighbour lookup table
         self.lookup_table = self._build_lookup_table(k_signature=self.k_signature, 
@@ -1012,6 +1016,21 @@ class Comparator:
         If the comparator cannot make a valid decision, the current policy is kept.
         """
 
+        # Default debug info for this step
+        self.last_step_info = ComparatorStepInfo(
+            step=int(step),
+            current_policy=str(current_policy),
+            next_policy=str(current_policy),
+            switch_committed=False,
+            candidate_count=0,
+            best_idx=None,
+            best_score=None,
+            query_local_reward_mean=None,
+            best_candidate_local_reward_mean=None,
+            best_candidate_policy=None,
+            best_candidate_condition=None,
+        )
+
         # Compute the live query statistics from the current history buffer
         query_stats = self.compute_query_statistics(
             current_policy=current_policy,
@@ -1022,6 +1041,10 @@ class Comparator:
         if query_stats is None:
             return current_policy
 
+        self.last_step_info.query_local_reward_mean = float(
+            query_stats.local_reward_mean
+        )
+
         # Build the candidate mask based on query-vs-memory criteria
         candidate_mask_result = self.build_candidate_mask(query_stats)
 
@@ -1030,6 +1053,8 @@ class Comparator:
             query_stats=query_stats,
             candidate_mask=candidate_mask_result.candidate_mask,
         )
+
+        self.last_step_info.candidate_count = int(len(candidate_scores.total_score))
 
         # No valid candidates exist, so keep using the current policy
         if len(candidate_scores.total_score) == 0:
@@ -1060,6 +1085,18 @@ class Comparator:
 
         # Read the policy key associated with the selected historical candidate
         next_policy = str(self.policy_keys[best_candidate_idx])
+
+        # Store debug info for logging
+        self.last_step_info.next_policy = next_policy
+        self.last_step_info.candidate_count = int(len(candidate_scores.total_score))
+        self.last_step_info.best_idx = best_candidate_idx
+        self.last_step_info.best_score = float(candidate_scores.total_score[best_position])
+        self.last_step_info.query_local_reward_mean = float(query_stats.local_reward_mean)
+        self.last_step_info.best_candidate_local_reward_mean = float(
+            self.lookup_table.local_reward_mean[best_candidate_idx]
+        )
+        self.last_step_info.best_candidate_policy = str(self.policy_keys[best_candidate_idx])
+        self.last_step_info.best_candidate_condition = str(self.condition_names[best_candidate_idx])
 
         log.debug(
             "Comparator step=%d current=%s next=%s candidates=%d best_idx=%d "

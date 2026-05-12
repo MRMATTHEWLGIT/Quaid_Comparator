@@ -53,6 +53,27 @@ class EpisodeStats:
         return statistics.stdev(self.inference_times_us)
 
 
+@dataclass
+class ComparatorStepInfo:
+    """
+    Per-step comparator decision information for logging.
+    """
+
+    step: int
+    current_policy: str
+    next_policy: str
+    switch_committed: bool
+
+    candidate_count: int
+    best_idx: Optional[int]
+    best_score: Optional[float]
+
+    query_local_reward_mean: Optional[float]
+    best_candidate_local_reward_mean: Optional[float]
+    best_candidate_policy: Optional[str]
+    best_candidate_condition: Optional[str]
+
+
 class InferenceStats:
     """Collects per-episode and aggregate statistics across an evaluation run."""
 
@@ -80,6 +101,22 @@ class InferenceStats:
                 ' steps INTEGER,'
                 ' wall_seconds REAL)'
             )
+            self._sqlite.execute(
+                "CREATE TABLE IF NOT EXISTS comparator_steps ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " episode_no INTEGER,"
+                " step INTEGER,"
+                " current_policy TEXT,"
+                " next_policy TEXT,"
+                " switch_committed INTEGER,"
+                " candidate_count INTEGER,"
+                " best_idx INTEGER,"
+                " best_score REAL,"
+                " query_local_reward_mean REAL,"
+                " best_candidate_local_reward_mean REAL,"
+                " best_candidate_policy TEXT,"
+                " best_candidate_condition TEXT)"
+            )
             self._sqlite.commit()
 
     # -------------------------------------------------- recording -----
@@ -97,6 +134,51 @@ class InferenceStats:
             (ep.episode_no, ep.reward, ep.steps, ep.wall_seconds),
         )
         self._sqlite.commit()
+
+
+    def record_comparator_step(
+        self,
+        *,
+        episode_no: int,
+        step_info: ComparatorStepInfo,
+    ) -> None:
+        """
+        Record one comparator decision/debug row.
+        """
+
+        if self._sqlite is None:
+            return
+
+        self._sqlite.execute(
+            "INSERT INTO comparator_steps ("
+            " episode_no,"
+            " step,"
+            " current_policy,"
+            " next_policy,"
+            " switch_committed,"
+            " candidate_count,"
+            " best_idx,"
+            " best_score,"
+            " query_local_reward_mean,"
+            " best_candidate_local_reward_mean,"
+            " best_candidate_policy,"
+            " best_candidate_condition"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(episode_no),
+                int(step_info.step),
+                str(step_info.current_policy),
+                str(step_info.next_policy),
+                int(bool(step_info.switch_committed)),
+                int(step_info.candidate_count),
+                step_info.best_idx,
+                step_info.best_score,
+                step_info.query_local_reward_mean,
+                step_info.best_candidate_local_reward_mean,
+                step_info.best_candidate_policy,
+                step_info.best_candidate_condition,
+            ),
+        )
 
     def close(self) -> None:
         if self._sqlite is not None:

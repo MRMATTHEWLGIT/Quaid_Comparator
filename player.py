@@ -222,12 +222,15 @@ class ComparatorPlayer:
                 # Policy switch commit block
                 # ------------------------------------------------------------------
 
+                switch_committed = False
                 can_switch = (step - last_switch_step) >= self.min_switch_interval
 
                 if next_policy != current_policy and can_switch:
+
                     previous_policy = current_policy
                     current_policy = next_policy
                     last_switch_step = step
+                    switch_committed = True
 
                     log.info(
                         "Comparator switched policy at episode=%d step=%d: %s -> %s",
@@ -235,6 +238,28 @@ class ComparatorPlayer:
                         step,
                         previous_policy,
                         current_policy,
+                    )
+
+                elif next_policy != current_policy:
+
+                    log.debug(
+                        "Comparator switch blocked by cooldown at episode=%d step=%d: %s -> %s",
+                        episode_no + 1,
+                        step,
+                        current_policy,
+                        next_policy,
+                    )
+
+                # Extract the last step info from the comparator
+                step_info = self.comparator.last_step_info
+
+                # Record the comparator step information if it exists
+                if step_info is not None:
+                    step_info.switch_committed = switch_committed
+
+                    self.stats.record_comparator_step(
+                        episode_no=episode_no,
+                        step_info=step_info,
                     )
 
                 # ------------------------------------------------------------------
