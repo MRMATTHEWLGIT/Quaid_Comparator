@@ -1,24 +1,24 @@
-# Comparator policy configuration
-
 # The initial policy to use for the comparator
 initial_policy: "flat"
 
 # The policies to use for the comparator
 policies:
-
   flat:
-    model_path: "models/onnx/aug_act_net_QuaidSIM-Flat_RA-TD3_+337.452_400099.onnx"
-
+    model_path: "Models/Onnx/aug_act_net_QuaidSIM-Flat_RA-TD3_+337.452_400099.onnx"
   ramp:
-    model_path: "models/onnx/aug_act_net_QuaidSIM-Ramp_RA-TD3_+337.452_400099.onnx"
-
+    model_path: "Models/Onnx/aug_act_net_QuaidSIM-Ramp_RA-TD3_+337.452_400099.onnx"
   uneven:
-    model_path: "models/onnx/aug_act_net_QuaidSIM-Uneven_RA-TD3_+348.233_400099.onnx"
+    model_path: "Models/Onnx/aug_act_net_QuaidSIM-Uneven_RA-TD3_+348.233_400099.onnx"
 
-# Comparator embedding GRU models
+# The path to the trained GRU model in PyTorch format and ONNX format
+embedding_gru:
+  pth_path: "Models/Base/trained_model_GRU.pth"
+  onnx_path: "Models/Onnx/aug_trained_model_GRU_state_only.onnx"
 
-# PyTorch checkpoint used during training and analysis
-embedding_gru_pth_path: "models/base/trained_model_GRU.pth"
+# The path to the comparator database
+comparator_database_path: "Models/Comparator/comparator_database.npz"
 
-# ONNX-exported embedding GRU used during online inference
-embedding_gru_onnx_path: "models/onnx/aug_trained_model_GRU_state_only.onnx"
+# The UMAP model to use for the comparator
+umap:
+  kind: "standard" # or can be 'parametric_onnx'
+  path: "Models/Umap/selector_umap.pkl"
