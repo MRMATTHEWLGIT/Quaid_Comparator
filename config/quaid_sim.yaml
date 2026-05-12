@@ -3,7 +3,8 @@
 ports:
   port: /dev/ttyUSB0
   #  mqtt_server_ip: "tcp://192.168.15.127:1883"
-  mqtt_server_ip: "tcp://mqtt-server:1883"
+  # mqtt_server_ip: "tcp://mqtt-server:1883"
+  mqtt_server_ip: "tcp://127.0.0.1:1883"
   mqtt_queue_no: "100"
 robot:
   sim: 1

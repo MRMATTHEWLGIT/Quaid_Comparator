@@ -36,6 +36,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from quaid_env import QuaidEnv, load_settings
 
 
 def get_args(argv=None) -> argparse.Namespace:
@@ -161,3 +162,99 @@ def get_args(argv=None) -> argparse.Namespace:
             )
 
     return args
+
+
+def detect_model_info(model_path: str) -> tuple[str, str]:
+    """
+    Infer the environment and policy names from an actor model filename.
+
+    Example:
+        ''aug_act_net_QuaidSIM-Flat_RA-TD3_+337.452.onnx''
+
+    Returns:
+        ('QuaidSIM-Flat', 'Flat')
+    """
+
+    name = Path(model_path).name
+    match = re.search(r"act_net_(QuaidSIM-([^-_]+))_", name)
+
+    if not match:
+        return "unknown", "unknown"
+
+    env_name = match.group(1)
+    policy_name = match.group(2)
+
+    return env_name, policy_name
+
+
+def create_run_dir(args: argparse.Namespace, timestamp: str | None = None) -> Path:
+    """
+    Create and return the timestamped output directory for the current run.
+    """
+
+    # Single-policy mode
+    if args.mode == "single":
+
+        detected_env_name, detected_policy_name = detect_model_info(args.model)
+
+        # Override the environment and policy names if provided
+        env_name = args.env_name or detected_env_name
+        policy_name = args.policy_name or detected_policy_name
+
+    # Comparator mode
+    elif args.mode == "comparator":
+
+        # Override the environment and policy names if provided
+        env_name = args.env_name or "QuaidSIM"
+        policy_name = args.policy_name or "comparator"
+
+    else:
+        raise ValueError(f"Unsupported mode: {args.mode}")
+
+    # Create the run directory
+    run_dir = Path(args.output_root) / env_name / policy_name / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Run output: {run_dir}")
+
+    return run_dir
+
+
+def main(argv=None) -> int:
+
+    # Parse command-line arguments
+    args = get_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s',
+    )
+
+    # Create the timestamp for the run
+    timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
+
+    # Create the run directory
+    run_dir = create_run_dir(args, timestamp)
+
+    # Load the environment settings (.yaml file)
+    env_settings = load_settings(args.env_config)
+
+    if args.mqtt_queue is not None:
+
+        # Override the MQTT queue specified in the environment YAML config.
+        # Stored as a string to match the QuaidEnv configuration format.
+        env_settings.ports.mqtt_queue_no = str(args.mqtt_queue)
+
+    # Create the environment and connect to it
+    env = QuaidEnv(env_settings)
+    env.connect()
+
+    # Setup the SQLite logger if requested
+    if not args.no_logger:
+        env.setup_logger(run_dir / f"Quaid_{timestamp}.sqlite")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
