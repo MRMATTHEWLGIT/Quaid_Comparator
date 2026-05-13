@@ -298,9 +298,33 @@ class ComparatorPlayer:
                 ep.mean_inference_us,
             )
 
+            # Pause between episodes so the robot can be reset physically
+            if episode_no < self.test_episodes - 1:
+                self._pause_between_episodes()
+
             self._wait_if_paused()
 
         return self.stats
+    
+
+    def _pause_between_episodes(self) -> None:
+        """
+        Pause the robot between episodes until the controller receives P0.
+        """
+
+        try:
+            log.info("Pausing robot between episodes with P1.")
+            self.env.controller.message("P1")
+
+        except AttributeError:
+            log.warning("Environment controller does not support message('P1').")
+            return
+
+        # Give the controller time to publish and update paused state
+        time.sleep(0.5)
+
+        # Wait until the controller is unpaused again, usually after P0 is sent
+        self._wait_if_paused()
 
 
     def _wait_if_paused(self) -> None:
@@ -314,7 +338,7 @@ class ComparatorPlayer:
             env.paused
         """
 
-        for _ in range(60):
+        while True:
 
             paused = False
 
