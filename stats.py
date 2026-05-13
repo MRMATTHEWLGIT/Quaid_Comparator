@@ -73,6 +73,9 @@ class ComparatorStepInfo:
     best_candidate_policy: Optional[str]
     best_candidate_condition: Optional[str]
 
+    query_umap_x: Optional[float]
+    query_umap_y: Optional[float]
+
 
 class InferenceStats:
     """Collects per-episode and aggregate statistics across an evaluation run."""
@@ -115,7 +118,9 @@ class InferenceStats:
                 " query_local_reward_mean REAL,"
                 " best_candidate_local_reward_mean REAL,"
                 " best_candidate_policy TEXT,"
-                " best_candidate_condition TEXT)"
+                " best_candidate_condition TEXT,"
+                " query_umap_x REAL,"
+                " query_umap_y REAL)"
             )
             self._sqlite.commit()
 
@@ -162,8 +167,10 @@ class InferenceStats:
             " query_local_reward_mean,"
             " best_candidate_local_reward_mean,"
             " best_candidate_policy,"
-            " best_candidate_condition"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " best_candidate_condition,"
+            " query_umap_x,"
+            " query_umap_y"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
@@ -177,6 +184,8 @@ class InferenceStats:
                 step_info.best_candidate_local_reward_mean,
                 step_info.best_candidate_policy,
                 step_info.best_candidate_condition,
+                step_info.query_umap_x,
+                step_info.query_umap_y,
             ),
         )
 

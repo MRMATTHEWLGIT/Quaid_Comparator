@@ -1029,6 +1029,8 @@ class Comparator:
             best_candidate_local_reward_mean=None,
             best_candidate_policy=None,
             best_candidate_condition=None,
+            query_umap_x=None,
+            query_umap_y=None,
         )
 
         # Compute the live query statistics from the current history buffer
@@ -1044,6 +1046,10 @@ class Comparator:
         self.last_step_info.query_local_reward_mean = float(
             query_stats.local_reward_mean
         )
+
+        # Store the query's 2D UMAP coordinates for logging and analysis
+        self.last_step_info.query_umap_x = float(query_stats.query_embedding_2d[0])
+        self.last_step_info.query_umap_y = float(query_stats.query_embedding_2d[1])
 
         # Build the candidate mask based on query-vs-memory criteria
         candidate_mask_result = self.build_candidate_mask(query_stats)
