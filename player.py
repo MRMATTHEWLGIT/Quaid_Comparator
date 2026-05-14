@@ -193,11 +193,41 @@ class ComparatorPlayer:
                 )
 
                 # ------------------------------------------------------------------
+                # Environment step block
+                # ------------------------------------------------------------------
+
+                obs, obs_raw, reward, terminated, truncated, _info = self.env.step(action)
+
+                episode_reward += float(reward)
+
+                # ------------------------------------------------------------------
                 # Comparator policy-selection block
                 # ------------------------------------------------------------------
 
-                # Comparator requires the raw observation values, not normalized
-                comparator_state = self.preprocessor.process(obs_raw, action)
+                # Comparator uses the post-step raw observation paired with action_t.
+                # This matches the SQLite logging/training data:
+                #     env.step(action_t) -> obs_raw_{t+1}
+                #     logged row        -> obs_raw_{t+1} + action_t
+                comparator_state = np.concatenate(
+                    [
+                        np.asarray(obs_raw, dtype=np.float32),
+                        np.asarray(action, dtype=np.float32),
+                    ],
+                    axis=0,
+                )
+
+                # feature_names = [
+                #     "current_front_left", "current_front_right", "current_back_left",
+                #     "current", "yaw", "acc_z", "pitch", "roll", "current_back_right",
+                #     "servo0", "servo1", "servo2", "servo3",
+                #     "servo4", "servo5", "servo6", "servo7",
+                #     "action0", "action1", "action2", "action3",
+                #     "action4", "action5", "action6", "action7",
+                # ]
+
+                # print("\nLIVE COMPARATOR STATE")
+                # for name, value in zip(feature_names, comparator_state):
+                #     print(f"{name:>20}: {value: .6f}")
 
                 self.comparator.update_query_history(comparator_state)
 
@@ -210,14 +240,6 @@ class ComparatorPlayer:
                     raise KeyError(f"Comparator selected unknown policy: {next_policy}")
 
                 inference_times.append((time.perf_counter_ns() - inference_start) // 1000)
-
-                # ------------------------------------------------------------------
-                # Environment step block
-                # ------------------------------------------------------------------
-
-                obs, obs_raw, reward, terminated, truncated, _info = self.env.step(action)
-
-                episode_reward += float(reward)
 
                 # ------------------------------------------------------------------
                 # Policy switch commit block
