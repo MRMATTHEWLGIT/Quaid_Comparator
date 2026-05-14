@@ -138,13 +138,13 @@ class ComparatorPlayer:
         """
 
         # Ensure the environment is reset before the loop
-        obs, _ = self.env.reset()
+        obs, obs_raw, _ = self.env.reset()
         time.sleep(1.0)
 
         for episode_no in range(self.test_episodes):
 
             # Reset the environment after each episode
-            obs, _ = self.env.reset()
+            obs, obs_raw, _ = self.env.reset()
 
             # Reset the comparator after each episode
             self.comparator.reset()
@@ -196,7 +196,8 @@ class ComparatorPlayer:
                 # Comparator policy-selection block
                 # ------------------------------------------------------------------
 
-                comparator_state = self.preprocessor.process(obs, action)
+                # Comparator requires the raw observation values, not normalized
+                comparator_state = self.preprocessor.process(obs_raw, action)
 
                 self.comparator.update_query_history(comparator_state)
 
@@ -214,7 +215,7 @@ class ComparatorPlayer:
                 # Environment step block
                 # ------------------------------------------------------------------
 
-                obs, reward, terminated, truncated, _info = self.env.step(action)
+                obs, obs_raw, reward, terminated, truncated, _info = self.env.step(action)
 
                 episode_reward += float(reward)
 

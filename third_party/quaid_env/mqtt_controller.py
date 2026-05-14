@@ -106,7 +106,7 @@ class MqttController:
         self.data.mutate(
             time_delta=pkt.time_delta,
             distance=pkt.distance,
-            yaw=pkt.yaw,
+            # yaw=pkt.yaw, want to always use Mocap yaw 
             pitch=pkt.pitch,
             roll=pkt.roll,
             voltage=pkt.voltage,
@@ -211,6 +211,9 @@ class MqttController:
 
     def start_streaming(self) -> None:
         self._send(self._topic_act, b'x\n')
+
+    def start_mocap_streaming(self) -> None:
+        self._send(self._topic_act, b'm\n')
 
     def stop_streaming(self) -> None:
         self._send(self._topic_act, b'y\n')

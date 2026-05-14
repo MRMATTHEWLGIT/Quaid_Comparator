@@ -119,12 +119,13 @@ _SERVO_FIELDS = (
 )
 
 
-def _write_servos(out: np.ndarray, data: QuaidData, settings: ObservationSettings) -> None:
+def _write_servos(out: np.ndarray, out_raw: np.ndarray, data: QuaidData, settings: ObservationSettings) -> None:
     for i, (norm_key, attr) in enumerate(_SERVO_FIELDS):
         out[IND_SERVO_0 + i] = normalize(norm_key, getattr(data, attr), settings)
+        out_raw[IND_SERVO_0 + i] = getattr(data, attr)
 
 
-def _write_current_per_leg(out: np.ndarray, data: QuaidData, settings: ObservationSettings) -> None:
+def _write_current_per_leg(out: np.ndarray, out_raw: np.ndarray, data: QuaidData, settings: ObservationSettings) -> None:
     """Overwrite slots 0/1/2/8 with the four per-leg currents.
 
     This is intentional — when ``time_delta`` / ``distance`` / ``voltage`` /
@@ -133,9 +134,16 @@ def _write_current_per_leg(out: np.ndarray, data: QuaidData, settings: Observati
     QuaidEnv.cpp:255-260.
     """
     out[IND_CURRENT_FRONT_LEFT] = normalize('current_per_leg', data.current_front_left, settings)
+    out_raw[IND_CURRENT_FRONT_LEFT] = data.current_front_left
+
     out[IND_CURRENT_FRONT_RIGHT] = normalize('current_per_leg', data.current_front_right, settings)
+    out_raw[IND_CURRENT_FRONT_RIGHT] = data.current_front_right
+    
     out[IND_CURRENT_BACK_LEFT] = normalize('current_per_leg', data.current_back_left, settings)
+    out_raw[IND_CURRENT_BACK_LEFT] = data.current_back_left
+
     out[IND_CURRENT_BACK_RIGHT] = normalize('current_per_leg', data.current_back_right, settings)
+    out_raw[IND_CURRENT_BACK_RIGHT] = data.current_back_right
 
 
 def build_reset_observation(data: QuaidData, settings: ObservationSettings) -> np.ndarray:
@@ -147,26 +155,40 @@ def build_reset_observation(data: QuaidData, settings: ObservationSettings) -> n
     """
     out = np.zeros(OBSERVATION_SIZE, dtype=np.float32)
 
+    # Used to store all the raw observation values, not normalized
+    out_raw = np.zeros(OBSERVATION_SIZE, dtype=np.float32)
+
     out[IND_CURRENT_FRONT_LEFT] = 0.0
     out[IND_CURRENT_FRONT_RIGHT] = 0.0
     out[IND_CURRENT_BACK_LEFT] = 0.0
     out[IND_CURRENT_BACK_RIGHT] = 0.0
 
+    out_raw[IND_CURRENT_FRONT_LEFT] = 0.0
+    out_raw[IND_CURRENT_FRONT_RIGHT] = 0.0
+    out_raw[IND_CURRENT_BACK_LEFT] = 0.0
+    out_raw[IND_CURRENT_BACK_RIGHT] = 0.0
+
     out[IND_CURRENT] = 0.0  # not moving, no current
+    out_raw[IND_CURRENT] = 0.0
     if settings.yaw:
         out[IND_YAW] = normalize('yaw', data.yaw, settings)
+        out_raw[IND_YAW] = data.yaw
     if settings.pitch:
         out[IND_PITCH] = normalize('pitch', data.pitch, settings)
+        out_raw[IND_PITCH] = data.pitch
     if settings.roll:
         out[IND_ROLL] = normalize('roll', data.roll, settings)
+        out_raw[IND_ROLL] = data.roll
     out[IND_OBS_AGE] = 0.0
+    out_raw[IND_OBS_AGE] = 0.0
 
-    _write_servos(out, data, settings)
+    _write_servos(out, out_raw, data, settings)
 
     if settings.acc_z:
         out[IND_ACC_Z] = normalize('acc_z', data.acc_z, settings)
-
-    return out
+        out_raw[IND_ACC_Z] = data.acc_z
+        
+    return out, out_raw
 
 
 def build_step_observation(
@@ -178,7 +200,7 @@ def build_step_observation(
     time_delta_centisec: float,
     observation_age_centisec: float,
     reward_type: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Mirror ``QuaidEnv::step`` observation construction (QuaidEnv.cpp:165-264).
 
     Slot layout (positions reused per the alias rules above):
@@ -201,38 +223,51 @@ def build_step_observation(
     """
     out = np.zeros(OBSERVATION_SIZE, dtype=np.float32)
 
+    # Used to store all the raw observation values, not normalized
+    out_raw = np.zeros(OBSERVATION_SIZE, dtype=np.float32)
+
     # Primary fields, gated by the YAML.
     if settings.time_delta:
         out[IND_TIME_DELTA] = time_delta_centisec
+        out_raw[IND_TIME_DELTA] = time_delta_centisec
     if settings.distance:
         key = 'euclidean-distance' if reward_type == 'euclidean' else 'x-distance'
         out[IND_DISTANCE] = normalize(key, distance, settings)
+        out_raw[IND_DISTANCE] = distance
     if settings.voltage:
         out[IND_VOLTAGE] = normalize('voltage', data.voltage, settings)
+        out_raw[IND_VOLTAGE] = data.voltage
     if settings.current:
         out[IND_CURRENT] = normalize('current', data.current, settings)
+        out_raw[IND_CURRENT] = data.current
     if settings.yaw:
         out[IND_YAW] = normalize('yaw', data.yaw, settings)
+        out_raw[IND_YAW] = data.yaw
     if settings.yaw_delta:
         out[IND_YAW_DELTA] = normalize('yaw_delta', yaw_delta, settings)
+        out_raw[IND_YAW_DELTA] = yaw_delta
     if settings.pitch:
         out[IND_PITCH] = normalize('pitch', data.pitch, settings)
+        out_raw[IND_PITCH] = data.pitch
     if settings.roll:
         out[IND_ROLL] = normalize('roll', data.roll, settings)
+        out_raw[IND_ROLL] = data.roll
     if settings.observation_age:
         out[IND_OBS_AGE] = observation_age_centisec
+        out_raw[IND_OBS_AGE] = observation_age_centisec
 
     # Servos always.
-    _write_servos(out, data, settings)
+    _write_servos(out, out_raw, data, settings)
 
     # Aliased overrides — order matters: per-leg currents go AFTER the
     # primary fields so they overwrite slots 0/1/2/8 when enabled.
     if settings.current_per_leg:
-        _write_current_per_leg(out, data, settings)
+        _write_current_per_leg(out, out_raw, data, settings)
     if settings.acc_z:
         out[IND_ACC_Z] = normalize('acc_z', data.acc_z, settings)
+        out_raw[IND_ACC_Z] = data.acc_z
 
-    return out
+    return out, out_raw
 
 
 def yaw_delta_with_wrap(last_yaw: float, current_yaw: float) -> float:

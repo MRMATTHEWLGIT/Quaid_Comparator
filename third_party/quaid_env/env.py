@@ -96,6 +96,7 @@ class QuaidEnv(gym.Env):
         self.controller.connect()
         self.controller.upload_settings()
         self.controller.start_streaming()
+        self.controller.start_mocap_streaming()
         self._connected = True
 
     def setup_logger(self, sqlite_path) -> None:
@@ -146,14 +147,14 @@ class QuaidEnv(gym.Env):
         self._action_history.clear()
 
         data = self.controller.data.snapshot()
-        obs = build_reset_observation(data, self.settings.observations)
+        obs, obs_raw = build_reset_observation(data, self.settings.observations)
 
         self._last_yaw = data.yaw
         self._last_position = (data.position_x, data.position_y)
         self._last_step_ms = int(time.time() * 1000)
 
         info = {'episode': self._episode_no}
-        return obs, info
+        return obs, obs_raw, info
 
     # -------------------------------------------------------------- step --
     def step(self, action) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -191,8 +192,6 @@ class QuaidEnv(gym.Env):
         else:
             distance = data.position_x - self._last_position[0]
 
-        print("BIGGGGGG BOIIIII")
-
         # Update mean yaw (the C++ formula caps the running average at
         # mean_yaw_steps samples — see QuaidEnv.cpp:181-186).
         denom = min(self._frame, r.mean_yaw_steps) + 1
@@ -204,7 +203,7 @@ class QuaidEnv(gym.Env):
 
         yaw_delta = yaw_delta_with_wrap(self._last_yaw, data.yaw)
 
-        obs = build_step_observation(
+        obs, obs_raw = build_step_observation(
             data,
             self.settings.observations,
             distance=distance,
@@ -265,7 +264,7 @@ class QuaidEnv(gym.Env):
             'episode': self._episode_no,
             'step': self._steps,
         }
-        return obs, float(reward), terminated, truncated, info
+        return obs, obs_raw, float(reward), terminated, truncated, info
 
     # ----------------------------------------------------- log helpers --
     def _log_step(self, *, now_ms, data, action, breakdown,
