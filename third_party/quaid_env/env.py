@@ -32,17 +32,17 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from quaid_env.config import Settings
-from quaid_env.mqtt_controller import MqttController
-from quaid_env.observations import (
+from .config import Settings
+from .mqtt_controller import MqttController
+from .observations import (
     OBSERVATION_SIZE,
     build_reset_observation,
     build_step_observation,
     yaw_delta_with_wrap,
 )
-from quaid_env.reward import RewardBreakdown, compute_reward
-from quaid_env.sqlite_logger import SqliteLogger
-from quaid_env.theta import ThetaController
+from .reward import RewardBreakdown, compute_reward
+from .sqlite_logger import SqliteLogger
+from .theta import ThetaController
 
 
 log = logging.getLogger(__name__)
@@ -190,6 +190,8 @@ class QuaidEnv(gym.Env):
                                   data.position_y - self._last_position[1])
         else:
             distance = data.position_x - self._last_position[0]
+
+        print("BIGGGGGG BOIIIII")
 
         # Update mean yaw (the C++ formula caps the running average at
         # mean_yaw_steps samples — see QuaidEnv.cpp:181-186).

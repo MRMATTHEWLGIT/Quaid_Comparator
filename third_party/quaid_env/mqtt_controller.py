@@ -22,14 +22,14 @@ from typing import Iterable, Optional, Sequence
 
 import paho.mqtt.client as mqtt
 
-from quaid_env.config import Settings
-from quaid_env.packets import (
+from .config import Settings
+from .packets import (
     OBSERVATION_HEADER,
     MOCAP_HEADER,
     decode_mocap,
     decode_observation,
 )
-from quaid_env.quaid_data import SharedQuaidData
+from .quaid_data import SharedQuaidData
 
 
 log = logging.getLogger(__name__)

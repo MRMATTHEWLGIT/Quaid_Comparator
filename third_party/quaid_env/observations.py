@@ -18,8 +18,8 @@ from typing import Optional
 
 import numpy as np
 
-from quaid_env.config import ObservationSettings
-from quaid_env.quaid_data import QuaidData
+from .config import ObservationSettings
+from .quaid_data import QuaidData
 
 
 # ---- Slot indices (see QuaidEnv.h:57-74) -------------------------------------

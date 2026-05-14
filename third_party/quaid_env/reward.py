@@ -14,8 +14,8 @@ from typing import Sequence
 
 import numpy as np
 
-from quaid_env.config import RewardSettings
-from quaid_env.quaid_data import QuaidData
+from .config import RewardSettings
+from .quaid_data import QuaidData
 
 
 @dataclass

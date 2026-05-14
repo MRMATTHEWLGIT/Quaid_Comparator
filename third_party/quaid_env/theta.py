@@ -16,8 +16,8 @@ import math
 import random
 from dataclasses import dataclass
 
-from quaid_env.config import RobotSettings
-from quaid_env.quaid_data import SharedQuaidData
+from .config import RobotSettings
+from .quaid_data import SharedQuaidData
 
 
 DEG_PER_RAD = 180.0 / math.pi  # matches QuaidUtils::DEG_TO_RAD (the C++ name
