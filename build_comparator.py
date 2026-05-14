@@ -218,6 +218,47 @@ def export_embedding_gru_to_onnx(model: RNN_GRU, onnx_path: Path, input_shape, d
     return onnx_path
 
 
+def project_embeddings_with_umap_onnx(
+    onnx_path: Path,
+    embeddings: np.ndarray,
+) -> np.ndarray:
+    """Project embeddings through the exported Parametric UMAP ONNX encoder."""
+
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(
+        str(onnx_path),
+        providers=["CPUExecutionProvider"],
+    )
+
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+
+    projected = session.run(
+        [output_name],
+        {input_name: embeddings.astype(np.float32)},
+    )[0]
+
+    return np.asarray(projected, dtype=np.float32)
+
+
+def check_parametric_umap_alignment(
+    saved_umap_embeddings: np.ndarray,
+    onnx_umap_embeddings: np.ndarray,
+) -> None:
+    """Check whether saved UMAP coordinates match ONNX-projected coordinates."""
+
+    errors = np.linalg.norm(
+        saved_umap_embeddings.astype(np.float32) - onnx_umap_embeddings.astype(np.float32),
+        axis=1,
+    )
+
+    print("\nParametric UMAP ONNX alignment check:")
+    print(f"  mean difference:   {errors.mean():.6f}")
+    print(f"  median difference: {np.median(errors):.6f}")
+    print(f"  max difference:    {errors.max():.6f}")
+
+
 def _to_numpy(value):
     """Convert saved tensors/statistics to NumPy arrays."""
 
@@ -696,11 +737,27 @@ def main(argv=None) -> int:
 
         # Export the parametric UMAP model to ONNX
         onnx_path = save_dir / "parametric_umap_encoder.onnx"
-        export_parametric_umap_encoder_to_onnx(parametric_umap=parametric_umap,
-                                               onnx_path=onnx_path,
-                                               input_dim=embeddings.shape[1])
+        export_parametric_umap_encoder_to_onnx(
+            parametric_umap=parametric_umap,
+            onnx_path=onnx_path,
+            input_dim=embeddings.shape[1],
+        )
 
-        # Set the UMAP path to the ONNX model
+        # Re-project the database embeddings through the exported ONNX encoder.
+        # This guarantees that saved database UMAP coordinates use the exact same
+        # projection path as runtime query embeddings.
+        onnx_umap_embeddings = project_embeddings_with_umap_onnx(
+            onnx_path=onnx_path,
+            embeddings=embeddings,
+        )
+
+        check_parametric_umap_alignment(
+            saved_umap_embeddings=umap_embeddings,
+            onnx_umap_embeddings=onnx_umap_embeddings,
+        )
+
+        umap_embeddings = onnx_umap_embeddings
+
         umap_path = onnx_path
         runtime_umap_kind = "parametric_onnx"
 
