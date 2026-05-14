@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import re
 import sys
 import yaml
@@ -225,6 +226,41 @@ def create_run_dir(args: argparse.Namespace, timestamp: str | None = None) -> Pa
     return run_dir
 
 
+def copy_run_configs(*, comparator_config_path: str | Path | None, env_config_path: str | Path,
+                     output_dir: Path) -> None:
+    """
+    Copy the environment and comparator configs into the run output directory.
+    """
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    env_config_path = Path(env_config_path)
+
+    if not env_config_path.exists():
+        raise FileNotFoundError(f"Environment config does not exist: {env_config_path}")
+
+    shutil.copy2(
+        env_config_path,
+        output_dir / "env.yaml",
+    )
+
+    if comparator_config_path is None:
+        return
+
+    comparator_config_path = Path(comparator_config_path)
+
+    if not comparator_config_path.exists():
+        raise FileNotFoundError(
+            f"Comparator config does not exist: {comparator_config_path}"
+        )
+
+    shutil.copy2(
+        comparator_config_path,
+        output_dir / "comparator.yaml",
+    )
+
+
 def main(argv=None) -> int:
 
     # Parse command-line arguments
@@ -240,6 +276,19 @@ def main(argv=None) -> int:
 
     # Create the run directory
     run_dir = create_run_dir(args, timestamp)
+
+    # Determine the comparator config path, if in comparator mode
+    comparator_config_path = None
+    if args.mode == "comparator":
+        comparator_config_path = args.comparator_config
+    else:
+        comparator_config_path = None
+
+    copy_run_configs(
+        comparator_config_path=comparator_config_path,
+        env_config_path=args.env_config,
+        output_dir=run_dir,
+    )
 
     # Load the environment settings (.yaml file)
     env_settings = load_settings(args.env_config)
