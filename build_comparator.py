@@ -26,6 +26,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 
+# Maximum number of samples to use for the comparator database
+MAX_COMPARATOR_SAMPLES = 30_000
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -53,6 +57,51 @@ def get_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--random-state", type=int, default=42, help="Random seed for UMAP.")
 
     return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+def policy_key_from_terrain_name(terrain_name: str) -> str:
+    """
+    Extract the policy key prefix from a terrain name.
+
+    Examples:
+        flat+305.334-mat    -> flat
+        ramp+301.146-ramp4 -> ramp
+        uneven+348.233-mat -> uneven
+    """
+
+    terrain_name = str(terrain_name).lower().strip()
+
+    if "+" not in terrain_name:
+        raise ValueError(
+            f"Could not determine policy key from terrain name: {terrain_name}"
+        )
+
+    return terrain_name.split("+", maxsplit=1)[0]
+
+
+def condition_name_from_terrain_name(terrain_name: str) -> str:
+    """
+    Extract the condition suffix from a terrain name.
+
+    Examples:
+        flat+305.334-mat    -> mat
+        flat+305.334-flat   -> flat
+        ramp+301.146-ramp4 -> ramp4
+    """
+
+    terrain_name = str(terrain_name).lower().strip()
+
+    if "-" not in terrain_name:
+        raise ValueError(
+            f"Could not determine condition name from terrain name: {terrain_name}"
+        )
+
+    return terrain_name.rsplit("-", maxsplit=1)[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -199,48 +248,181 @@ def save_embedding_gru_stats(save_dir: Path, stats: tuple) -> Path:
 # GRU embedding extraction
 # ---------------------------------------------------------------------------
 
-def load_testset(testset_path: Path, stats: tuple):
-    """Load and normalise the historical comparator dataset."""
+def stratified_subsample_indices(
+    terrain_names: np.ndarray,
+    *,
+    max_samples: int,
+    random_state: int,
+) -> tuple[np.ndarray, dict]:
+    """
+    Randomly subsample indices while balancing across policy-condition groups.
+    """
 
-    # Load the testset from a .npz file and extract required information
+    total_samples = int(len(terrain_names))
+
+    # Do not need to subsample if the total number of samples is less than the maximum
+    if total_samples <= max_samples:
+        return np.arange(total_samples), {
+            "was_subsampled": False,
+            "original_num_samples": total_samples,
+            "used_num_samples": total_samples,
+            "max_comparator_samples": max_samples,
+            "group_counts_before": {},
+            "group_counts_after": {},
+        }
+
+    rng = np.random.default_rng(random_state)
+
+    group_to_indices: dict[str, list[int]] = {}
+
+    for index, terrain_name in enumerate(terrain_names):
+        policy_key = policy_key_from_terrain_name(terrain_name)
+        condition_name = condition_name_from_terrain_name(terrain_name)
+        group_key = f"{policy_key}/{condition_name}"
+
+        group_to_indices.setdefault(group_key, []).append(index)
+
+    group_keys = sorted(group_to_indices.keys())
+    num_groups = len(group_keys)
+
+    base_quota = max_samples // num_groups
+    remainder = max_samples % num_groups
+
+    selected_indices = []
+    leftover_capacity = 0
+
+    group_counts_before = {
+        group_key: len(indices)
+        for group_key, indices in group_to_indices.items()
+    }
+
+    group_counts_after = {}
+
+    # First pass: give each group an approximately equal quota.
+    for group_position, group_key in enumerate(group_keys):
+        group_indices = np.asarray(group_to_indices[group_key], dtype=np.int64)
+
+        quota = base_quota + (1 if group_position < remainder else 0)
+        take_count = min(quota, len(group_indices))
+
+        chosen = rng.choice(group_indices, size=take_count, replace=False)
+
+        selected_indices.append(chosen)
+        group_counts_after[group_key] = int(take_count)
+
+        leftover_capacity += quota - take_count
+
+    selected_indices = np.concatenate(selected_indices)
+
+    # Second pass: if some small groups could not fill their quota, fill the
+    # remaining capacity from samples not already selected.
+    if leftover_capacity > 0:
+        selected_mask = np.zeros(total_samples, dtype=bool)
+        selected_mask[selected_indices] = True
+
+        remaining_indices = np.flatnonzero(~selected_mask)
+        extra_count = min(leftover_capacity, len(remaining_indices))
+
+        if extra_count > 0:
+            extra_indices = rng.choice(
+                remaining_indices,
+                size=extra_count,
+                replace=False,
+            )
+
+            selected_indices = np.concatenate([selected_indices, extra_indices])
+
+    selected_indices = np.sort(selected_indices.astype(np.int64))
+
+    sample_info = {
+        "was_subsampled": True,
+        "original_num_samples": total_samples,
+        "used_num_samples": int(len(selected_indices)),
+        "max_comparator_samples": max_samples,
+        "group_counts_before": group_counts_before,
+        "group_counts_after": {
+            group_key: int(np.sum(np.isin(selected_indices, group_to_indices[group_key])))
+            for group_key in group_keys
+        },
+    }
+
+    return selected_indices, sample_info
+
+
+def load_testset(testset_path: Path, stats: tuple, random_state: int = 42):
+    """Load, stratified-subsample, and normalise the historical comparator dataset."""
+
     testset = np.load(testset_path, allow_pickle=True)
-    X = torch.from_numpy(testset["X"]).float()
-    y = torch.from_numpy(testset["y"]).float()
-    rewards = torch.from_numpy(testset["rewards"]).float()
-    episode_ids = torch.from_numpy(testset["episode_ids"]).long()
-    database_ids = torch.from_numpy(testset["database_ids"]).long()
 
-    # Load terrain types and normalise all to lower case
+    X_np = testset["X"]
+    y_np = testset["y"]
+    rewards_np = testset["rewards"]
+    episode_ids_np = testset["episode_ids"]
+    database_ids_np = testset["database_ids"]
     raw_terrains = testset["terrain_ids"]
+
+    original_num_samples = int(X_np.shape[0])
+
+    # Normalised terrain strings are used both for stratified sampling and for
+    # the final terrain ID mapping saved into metadata.
     norm_terrains = np.array([str(t).strip().lower() for t in raw_terrains])
 
-    # Get the unique terrain values and create a map between type and int
+    sample_indices, sample_info = stratified_subsample_indices(
+        terrain_names=norm_terrains,
+        max_samples=MAX_COMPARATOR_SAMPLES,
+        random_state=random_state,
+    )
+
+    if sample_info["was_subsampled"]:
+        X_np = X_np[sample_indices]
+        y_np = y_np[sample_indices]
+        rewards_np = rewards_np[sample_indices]
+        episode_ids_np = episode_ids_np[sample_indices]
+        database_ids_np = database_ids_np[sample_indices]
+        raw_terrains = raw_terrains[sample_indices]
+        norm_terrains = norm_terrains[sample_indices]
+
+        print(
+            f"Stratified subsampled comparator testset from "
+            f"{original_num_samples:,} to {len(sample_indices):,} samples."
+        )
+
+        print("Samples per policy/condition after subsampling:")
+        for group_key, count in sorted(sample_info["group_counts_after"].items()):
+            print(f"  {group_key}: {count:,}")
+
+    else:
+        print(f"Using all {original_num_samples:,} comparator samples.")
+
+    X = torch.from_numpy(X_np).float()
+    y = torch.from_numpy(y_np).float()
+    rewards = torch.from_numpy(rewards_np).float()
+    episode_ids = torch.from_numpy(episode_ids_np).long()
+    database_ids = torch.from_numpy(database_ids_np).long()
+
     unique_terrains = np.unique(norm_terrains)
     terrain_map = {terrain: idx for idx, terrain in enumerate(unique_terrains)}
 
-    # Convert all terrain types to an int ID
     terrain_ints = np.array([terrain_map[t] for t in norm_terrains], dtype=np.int64)
     terrain_ids = torch.from_numpy(terrain_ints)
 
-    # Extract training normalisation statistics based on trained GRU model
-    X_mean, X_std, y_mean, y_std = [torch.as_tensor(_to_numpy(s)).float() for s in stats]
+    X_mean, X_std, y_mean, y_std = [torch.as_tensor(_to_numpy(s)).float()for s in stats]
 
-    # Standardise the features of X and y based on the training set statistics
     X_norm = (X - X_mean) / X_std
     y_norm = (y - y_mean) / y_std
 
-    # Create a dataloader for the testset
     dataset = TensorDataset(X_norm, y_norm, rewards, database_ids, episode_ids, terrain_ids)
+
     test_dl = DataLoader(dataset, batch_size=256, shuffle=False)
 
-    return test_dl, terrain_map, tuple(X.shape)
+    return test_dl, terrain_map, tuple(X.shape), sample_info
 
 
 def extract_embeddings(model: RNN_GRU, stats: tuple, testset_path: Path, device: torch.device):
     """Run the trained embedding GRU over the historical dataset."""
 
     # Load the testset and extract the terrain map and input shape
-    test_dl, terrain_map, input_shape = load_testset(testset_path=testset_path, stats=stats)
+    test_dl, terrain_map, input_shape, sample_info = load_testset(testset_path=testset_path, stats=stats)
 
     # Create a map between terrain ID and terrain type
     idx_to_terrain = {int(idx): terrain for terrain, idx in terrain_map.items()}
@@ -302,6 +484,7 @@ def extract_embeddings(model: RNN_GRU, stats: tuple, testset_path: Path, device:
         "idx_to_terrain": idx_to_terrain,
         "avg_mse": avg_mse,
         "input_shape": input_shape,
+        "sample_info": sample_info,
     }
 
 
@@ -541,6 +724,7 @@ def main(argv=None) -> int:
         "embedding_dim": int(embeddings.shape[1]),
         "num_points": int(embeddings.shape[0]),
         "input_shape": list(extracted["input_shape"]),
+        "sample_info": extracted["sample_info"],
         "gru_hyperparams": hp,
         "avg_embedding_gru_mse": float(extracted["avg_mse"]),
         "idx_to_terrain": extracted["idx_to_terrain"],

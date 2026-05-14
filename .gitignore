@@ -1,6 +1,7 @@
 # Data files
 data/
 models/comparator/
+testsets/sim_test_O+A_O_DbP27_SeqL100_Str10_20260514_164608.npz
 
 # Ignore all files in the .vscode directory
 .vscode/

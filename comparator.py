@@ -344,35 +344,32 @@ class Comparator:
 
     def _condition_name_from_terrain_name(self, terrain_name: str) -> str:
         """
-        Extract the condition name from a terrain name.
+        Extract the condition suffix from a terrain name.
         """
 
         terrain_name = str(terrain_name).lower().strip()
 
         if "-" not in terrain_name:
-            raise ValueError(f"Could not determine condition name from terrain name: {terrain_name}")
+            raise ValueError(
+                f"Could not determine condition name from terrain name: {terrain_name}"
+            )
 
-        condition_name = terrain_name.rsplit("-", maxsplit=1)[-1]
-
-        if condition_name in {"mat", "ramp4", "ramp8"}:
-            return condition_name
-
-        raise ValueError(f"Unknown condition name from terrain name: {terrain_name}")
+        return terrain_name.rsplit("-", maxsplit=1)[-1]
 
 
     def _policy_key_from_terrain_name(self, terrain_name: str) -> str:
         """
-        Extract the runtime policy key from a terrain name.
+        Extract the runtime policy key prefix from a terrain name.
         """
 
         terrain_name = str(terrain_name).lower().strip()
 
-        policy_part = terrain_name.split("+", maxsplit=1)[0]
+        if "+" not in terrain_name:
+            raise ValueError(
+                f"Could not determine policy key from terrain name: {terrain_name}"
+            )
 
-        if policy_part in {"flat", "ramp", "uneven"}:
-            return policy_part
-
-        raise ValueError(f"Could not determine policy key from terrain name: {terrain_name}")
+        return terrain_name.split("+", maxsplit=1)[0]
 
 
     def _build_database_labels(self) -> None:
