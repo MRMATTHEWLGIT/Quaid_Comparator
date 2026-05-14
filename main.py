@@ -41,6 +41,9 @@ from pathlib import Path
 from third_party.quaid_env import QuaidEnv, load_settings
 from player import ComparatorPlayer
 
+# Default max steps for the Quaid environment
+DEFAULT_MAX_STEPS = 500
+
 
 def get_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -93,7 +96,7 @@ def get_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("-e", "--episodes", type=int, default=5)
 
-    parser.add_argument("-s", "--max-steps", type=int, default=500)
+    parser.add_argument("-s", "--max-steps", type=int, default=DEFAULT_MAX_STEPS)
 
     parser.add_argument(
         "--step-delay-ms",
@@ -306,6 +309,10 @@ def main(argv=None) -> int:
     # Setup the SQLite logger if requested
     if not args.no_logger:
         env.setup_logger(run_dir / f"Quaid_{timestamp}.sqlite")
+
+    # Override the max steps if requested
+    if (args.max_steps != DEFAULT_MAX_STEPS):
+        env.settings.robot.max_steps = args.max_steps
 
 
     comparator_config = None

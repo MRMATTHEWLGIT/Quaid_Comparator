@@ -5,6 +5,7 @@ import re
 import time
 from pathlib import Path
 from typing import Optional
+from collections import deque
 
 import numpy as np
 
@@ -137,6 +138,9 @@ class ComparatorPlayer:
         Run comparator-based policy-switching rollouts.
         """
 
+        # Store the policy history for the comparator
+        policy_history = deque(maxlen=self.comparator.sequence_length)
+
         # Ensure the environment is reset before the loop
         obs, obs_raw, _ = self.env.reset()
         time.sleep(1.0)
@@ -171,6 +175,9 @@ class ComparatorPlayer:
             self._wait_if_paused()
 
             for step in range(self.max_test_steps):
+
+                # Save the current policy to the policy history
+                policy_history.append(current_policy)
 
                 inference_start = time.perf_counter_ns()
 
@@ -245,8 +252,19 @@ class ComparatorPlayer:
                 # Policy switch commit block
                 # ------------------------------------------------------------------
 
+                # Determine if the policy history is full and if it is pure
+                history_is_full = len(policy_history) == self.comparator.sequence_length
+                history_is_policy_pure = all(
+                    policy == current_policy
+                    for policy in policy_history
+                )
+
                 switch_committed = False
-                can_switch = (step - last_switch_step) >= self.min_switch_interval
+                can_switch = (
+                    history_is_full
+                    and history_is_policy_pure
+                    and (step - last_switch_step) >= self.min_switch_interval
+                )
 
                 if next_policy != current_policy and can_switch:
 

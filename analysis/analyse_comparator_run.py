@@ -317,14 +317,18 @@ def plot_umap_database_and_queries(
             ax.scatter(
                 switch_df["query_umap_x"],
                 switch_df["query_umap_y"],
-                s=95,
+                s=150,
                 facecolors="none",
-                edgecolors="black",
-                linewidths=1.6,
+                edgecolors="red",
+                linewidths=2.4,
                 label="committed switch",
+                zorder=6,
             )
 
-    ax.set_title("Comparator UMAP Space: Database Embeddings and Live Query Path")
+    episode_no = int(query_df["episode_no"].iloc[0])
+    ax.set_title(
+        f"Comparator UMAP Space: Historical Embeddings and Live Query Path - Episode {episode_no}"
+    )
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
     ax.grid(True, alpha=0.25)
@@ -336,11 +340,13 @@ def plot_umap_database_and_queries(
 
 
 def plot_query_trajectory(
+    database: dict,
     steps_df: pd.DataFrame,
     output_path: str | Path,
 ) -> None:
     """
-    Plot only the live query trajectory through UMAP space.
+    Plot the live query trajectory through UMAP space with historical database
+    embeddings shown lightly in the background.
     """
 
     output_path = Path(output_path)
@@ -348,31 +354,53 @@ def plot_query_trajectory(
 
     query_df = steps_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
 
+    if len(query_df) == 0:
+        return
+
+    umap_embeddings = database["umap_embeddings"]
+
     fig, ax = plt.subplots(figsize=(10, 8))
 
+    # Historical database background
+    ax.scatter(
+        umap_embeddings[:, 0],
+        umap_embeddings[:, 1],
+        s=8,
+        c="lightgrey",
+        alpha=0.18,
+        linewidths=0,
+        label="historical database",
+    )
+
+    # Live query path
     ax.plot(
         query_df["query_umap_x"],
         query_df["query_umap_y"],
-        linewidth=1.2,
-        alpha=0.8,
+        linewidth=1.4,
+        alpha=0.85,
+        zorder=3,
     )
 
     scatter = ax.scatter(
         query_df["query_umap_x"],
         query_df["query_umap_y"],
         c=query_df["step"],
-        s=35,
+        s=38,
         alpha=0.95,
         edgecolors="black",
         linewidths=0.3,
+        zorder=4,
     )
 
     fig.colorbar(scatter, ax=ax, label="Step")
 
-    ax.set_title("Live Query UMAP Trajectory")
+    episode_no = int(query_df["episode_no"].iloc[0])
+
+    ax.set_title(f"Live Query UMAP Trajectory - Episode {episode_no}")
     ax.set_xlabel("UMAP 1")
     ax.set_ylabel("UMAP 2")
     ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
@@ -427,20 +455,38 @@ def main() -> int:
     csv_path = output_dir / "comparator_steps_enriched.csv"
     steps_df.to_csv(csv_path, index=False)
 
-    # Save plots
-    database_query_plot_path = output_dir / "umap_database_with_queries.png"
-    query_trajectory_plot_path = output_dir / "query_umap_trajectory.png"
+    # Save per-episode plots
+    episode_plot_dir = output_dir / "episodes"
+    episode_plot_dir.mkdir(parents=True, exist_ok=True)
 
-    plot_umap_database_and_queries(
-        database=database,
-        steps_df=steps_df,
-        output_path=database_query_plot_path,
-    )
+    saved_plot_paths = []
 
-    plot_query_trajectory(
-        steps_df=steps_df,
-        output_path=query_trajectory_plot_path,
-    )
+    for episode_no, episode_df in steps_df.groupby("episode_no"):
+
+        database_query_plot_path = (
+            episode_plot_dir / f"episode_{int(episode_no):03d}_umap_database_with_queries.png"
+        )
+
+        query_trajectory_plot_path = (
+            episode_plot_dir / f"episode_{int(episode_no):03d}_query_umap_trajectory.png"
+        )
+
+        plot_umap_database_and_queries(
+            database=database,
+            steps_df=episode_df,
+            output_path=database_query_plot_path,
+        )
+
+        plot_query_trajectory(
+            database=database,
+            steps_df=episode_df,
+            output_path=query_trajectory_plot_path,
+        )
+
+        saved_plot_paths.extend([
+            database_query_plot_path,
+            query_trajectory_plot_path,
+        ])
 
     print(f"Run directory:       {paths['data_path']}")
     print(f"Comparator config:   {paths['comparator_config_path']}")
@@ -451,8 +497,7 @@ def main() -> int:
     print()
     print(f"Loaded {len(steps_df)} comparator steps.")
     print(f"Saved CSV:           {csv_path}")
-    print(f"Saved plot:          {database_query_plot_path}")
-    print(f"Saved plot:          {query_trajectory_plot_path}")
+    print(f"Saved episode plots: {episode_plot_dir}")
 
     return 0
 
