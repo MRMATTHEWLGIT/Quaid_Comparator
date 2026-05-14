@@ -38,7 +38,7 @@ import sys
 import yaml
 import time
 from pathlib import Path
-from quaid_env import QuaidEnv, load_settings
+from third_party.quaid_env import QuaidEnv, load_settings
 from player import ComparatorPlayer
 
 

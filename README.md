@@ -129,9 +129,11 @@ during comparator inference.
 Portions of this project are derived from or inspired by the following
 open-source repository:
 
-- [esp-dl-quant-icra2026](https://github.com/real-world-drl/esp-dl-quant-icra2026?utm_source=chatgpt.com)  
+- [esp-dl-quant-icra2026](https://github.com/real-world-drl/esp-dl-quant-icra2026)  
   Licensed under the MIT License.
 
-Relevant source files have been modified and integrated as part of this
-research project. Original copyright and license notices have been
-preserved where applicable.
+A modified vendored copy of the Quaid environment used by this project is
+located in:
+
+```text
+third_party/quaid_env/
