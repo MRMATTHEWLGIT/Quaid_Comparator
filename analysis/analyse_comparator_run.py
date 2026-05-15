@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
@@ -663,6 +664,383 @@ def plot_vote_counts_over_time(
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
+
+def minmax_scale_to_range(
+    values: np.ndarray,
+    *,
+    output_min: float = 0.0,
+    output_max: float = 100.0,
+) -> np.ndarray:
+    """
+    Min-max scale values into a fixed output range.
+
+    If all values are equal, return the midpoint of the output range.
+    """
+
+    values = np.asarray(values, dtype=float)
+
+    valid_mask = np.isfinite(values)
+
+    scaled = np.full_like(values, np.nan, dtype=float)
+
+    if not np.any(valid_mask):
+        return scaled
+
+    valid_values = values[valid_mask]
+
+    value_min = np.min(valid_values)
+    value_max = np.max(valid_values)
+
+    if np.isclose(value_min, value_max):
+        scaled[valid_mask] = (output_min + output_max) / 2.0
+        return scaled
+
+    scaled[valid_mask] = (
+        (valid_values - value_min)
+        / (value_max - value_min)
+        * (output_max - output_min)
+        + output_min
+    )
+
+    return scaled
+
+
+def add_policy_background_shading(
+    ax,
+    episode_df: pd.DataFrame,
+    *,
+    policy_column: str = "current_policy",
+    alpha: float = 0.08,
+) -> list[Patch]:
+    """
+    Add background shading showing which policy was active over time.
+
+    Returns legend handles for the policy shading.
+    """
+
+    if policy_column not in episode_df.columns:
+        return []
+
+    if "step" not in episode_df.columns:
+        return []
+
+    policy_df = episode_df.sort_values("step").copy()
+
+    if len(policy_df) == 0:
+        return []
+
+    steps = policy_df["step"].to_numpy(dtype=float)
+    policies = policy_df[policy_column].astype(str).to_numpy()
+
+    unique_policies = sorted(policy_df[policy_column].astype(str).unique())
+
+    colour_map = plt.get_cmap("tab10")
+
+    policy_colours = {
+        policy: colour_map(index % 10)
+        for index, policy in enumerate(unique_policies)
+    }
+
+    if len(steps) > 1:
+        step_delta = float(np.median(np.diff(steps)))
+    else:
+        step_delta = 1.0
+
+    # Identify contiguous policy segments.
+    segment_start_index = 0
+
+    for index in range(1, len(policy_df) + 1):
+
+        reached_end = index == len(policy_df)
+
+        policy_changed = (
+            not reached_end
+            and policies[index] != policies[segment_start_index]
+        )
+
+        if reached_end or policy_changed:
+
+            policy = policies[segment_start_index]
+
+            start_step = steps[segment_start_index] - 0.5 * step_delta
+            end_step = steps[index - 1] + 0.5 * step_delta
+
+            ax.axvspan(
+                start_step,
+                end_step,
+                color=policy_colours[policy],
+                alpha=alpha,
+                linewidth=0,
+                zorder=0,
+            )
+
+            segment_start_index = index
+
+    legend_handles = [
+        Patch(
+            facecolor=policy_colours[policy],
+            alpha=alpha,
+            label=f"Active policy: {policy}",
+        )
+        for policy in unique_policies
+    ]
+
+    return legend_handles
+
+
+def plot_episode_step_reward_scaled(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    rolling_window: int = 50,
+) -> None:
+    """
+    Plot raw and smoothed min-max scaled step reward for one episode.
+
+    The raw signal is shown transparently, while the rolling mean is shown
+    strongly. This makes local reward changes around switches easier to see.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required_columns = {"episode_no", "step", "step_reward_total"}
+
+    if not required_columns.issubset(steps_df.columns):
+        return
+
+    episode_df = steps_df.sort_values("step").copy()
+
+    episode_no = int(episode_df["episode_no"].iloc[0])
+
+    step_values = episode_df["step"].to_numpy()
+    step_reward = episode_df["step_reward_total"].to_numpy(dtype=float)
+
+    scaled_step_reward = minmax_scale_to_range(
+        step_reward,
+        output_min=0.0,
+        output_max=100.0,
+    )
+
+    episode_df["step_reward_scaled"] = scaled_step_reward
+
+    episode_df["step_reward_scaled_smooth"] = (
+        episode_df["step_reward_scaled"]
+        .rolling(window=rolling_window, min_periods=1, center=True)
+        .mean()
+    )
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    # Raw scaled reward, very transparent
+    ax.plot(
+        episode_df["step"],
+        episode_df["step_reward_scaled"],
+        linewidth=0.7,
+        alpha=0.15,
+        label="Step reward scaled 0-100",
+    )
+
+    # Smoothed scaled reward, main signal
+    ax.plot(
+        episode_df["step"],
+        episode_df["step_reward_scaled_smooth"],
+        linewidth=2.0,
+        alpha=0.95,
+        label=f"Rolling mean, window={rolling_window}",
+    )
+
+    if "switch_committed" in episode_df.columns:
+        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+        for _, row in switch_df.iterrows():
+            ax.axvline(
+                x=row["step"],
+                linewidth=1.0,
+                alpha=0.35,
+            )
+
+    ax.set_title(f"Comparator Smoothed Step Reward - Episode {episode_no}")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Min-max scaled step reward")
+    ax.set_ylim(-5.0, 105.0)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_episode_reward_rate(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    rolling_window: int = 50,
+) -> None:
+    """
+    Plot rolling reward rate over one episode.
+
+    Background shading shows which policy was active at each timestep.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required_columns = {"episode_no", "step", "step_reward_total"}
+
+    if not required_columns.issubset(steps_df.columns):
+        return
+
+    episode_df = steps_df.sort_values("step").copy()
+
+    episode_no = int(episode_df["episode_no"].iloc[0])
+
+    episode_df["reward_rate_smooth"] = (
+        episode_df["step_reward_total"]
+        .rolling(window=rolling_window, min_periods=1, center=True)
+        .mean()
+    )
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    policy_handles = add_policy_background_shading(
+        ax,
+        episode_df,
+        policy_column="current_policy",
+        alpha=0.08,
+    )
+
+    ax.plot(
+        episode_df["step"],
+        episode_df["reward_rate_smooth"],
+        linewidth=2.0,
+        label=f"Rolling reward rate, window={rolling_window}",
+        zorder=3,
+    )
+
+    if "switch_committed" in episode_df.columns:
+        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+        for _, row in switch_df.iterrows():
+            ax.axvline(
+                x=row["step"],
+                linewidth=1.0,
+                alpha=0.45,
+                zorder=4,
+            )
+
+    ax.set_title(f"Comparator Rolling Reward Rate - Episode {episode_no}")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Raw rolling step reward")
+    ax.grid(True, alpha=0.25)
+
+    line_handles, line_labels = ax.get_legend_handles_labels()
+
+    ax.legend(
+        handles=line_handles + policy_handles,
+        loc="best",
+        fontsize=9,
+    )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_episode_reward_components(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    rolling_window: int = 50,
+) -> None:
+    """
+    Plot smoothed distance, roll, and current reward components.
+
+    Background shading shows which policy was active at each timestep.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required_columns = {
+        "episode_no",
+        "step",
+        "reward_distance",
+        "reward_roll",
+        "reward_current",
+    }
+
+    if not required_columns.issubset(steps_df.columns):
+        return
+
+    episode_df = steps_df.sort_values("step").copy()
+
+    episode_no = int(episode_df["episode_no"].iloc[0])
+
+    component_columns = [
+        "reward_distance",
+        "reward_roll",
+        "reward_current",
+    ]
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    policy_handles = add_policy_background_shading(
+        ax,
+        episode_df,
+        policy_column="current_policy",
+        alpha=0.08,
+    )
+
+    for column in component_columns:
+        smoothed_column = f"{column}_smooth"
+
+        episode_df[smoothed_column] = (
+            episode_df[column]
+            .rolling(window=rolling_window, min_periods=1, center=True)
+            .mean()
+        )
+
+        label = column.replace("reward_", "")
+
+        ax.plot(
+            episode_df["step"],
+            episode_df[smoothed_column],
+            linewidth=1.8,
+            label=f"{label}, rolling mean",
+            zorder=3,
+        )
+
+    if "switch_committed" in episode_df.columns:
+        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+        for _, row in switch_df.iterrows():
+            ax.axvline(
+                x=row["step"],
+                linewidth=1.0,
+                alpha=0.45,
+                zorder=4,
+            )
+
+    ax.set_title(f"Comparator Reward Components - Episode {episode_no}")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Raw rolling reward component value")
+    ax.grid(True, alpha=0.25)
+
+    line_handles, line_labels = ax.get_legend_handles_labels()
+
+    ax.legend(
+        handles=line_handles + policy_handles,
+        loc="best",
+        fontsize=9,
+    )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 # -------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------
@@ -746,6 +1124,24 @@ def main() -> int:
         plot_vote_counts_over_time(
             steps_df=episode_df,
             output_path=vote_counts_plot_path,
+        )
+
+        plot_episode_step_reward_scaled(
+            steps_df=episode_df,
+            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_step_reward_scaled_smooth.png",
+            rolling_window=50,
+        )
+
+        plot_episode_reward_rate(
+            steps_df=episode_df,
+            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_reward_rate.png",
+            rolling_window=50,
+        )
+
+        plot_episode_reward_components(
+            steps_df=episode_df,
+            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_reward_components.png",
+            rolling_window=50,
         )
 
         saved_plot_paths.extend([

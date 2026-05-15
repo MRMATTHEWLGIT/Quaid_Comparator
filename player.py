@@ -169,6 +169,11 @@ class ComparatorPlayer:
             episode_start = time.perf_counter()
             inference_times: list[int] = []
 
+            # Track episode reward breakdown
+            reward_env = 0.0
+            episode_reward = 0.0
+            episode_performance_reward = 0.0
+
             self._wait_if_paused()
 
             for step in range(self.max_test_steps):
@@ -202,7 +207,32 @@ class ComparatorPlayer:
 
                 obs, obs_raw, reward, terminated, truncated, _info = self.env.step(action)
 
-                episode_reward += float(reward)
+                reward_env += float(reward)
+
+                # Extract the reward breakdown from the environment info
+                reward_breakdown = _info.get("reward_breakdown", None)
+
+                # Calculate the performance reward from the reward breakdown
+                if reward_breakdown is not None:
+                    reward_distance = float(reward_breakdown.distance)
+                    reward_roll = float(reward_breakdown.roll)
+                    reward_current = float(reward_breakdown.current)
+
+                    step_performance_reward = (
+                        reward_distance
+                        + reward_roll
+                        + reward_current
+                    )
+
+                else:
+                    reward_distance = None
+                    reward_roll = None
+                    reward_current = None
+
+                    # Fallback only. Normally reward_breakdown should exist
+                    step_performance_reward = float(reward)
+
+                episode_performance_reward += float(step_performance_reward)
 
                 # ------------------------------------------------------------------
                 # Comparator policy-selection block
@@ -295,6 +325,12 @@ class ComparatorPlayer:
                 if step_info is not None:
                     step_info.switch_committed = switch_committed
 
+                    step_info.reward_distance = reward_distance
+                    step_info.reward_roll = reward_roll
+                    step_info.reward_current = reward_current
+                    step_info.step_reward_total = float(step_performance_reward)
+                    step_info.episode_reward_total = float(episode_performance_reward)
+
                     self.stats.record_comparator_step(
                         episode_no=episode_no,
                         step_info=step_info,
@@ -319,7 +355,7 @@ class ComparatorPlayer:
 
             ep = EpisodeStats(
                 episode_no=episode_no,
-                reward=episode_reward,
+                reward=reward_env,
                 steps=step + 1,
                 wall_seconds=wall,
                 inference_times_us=inference_times,

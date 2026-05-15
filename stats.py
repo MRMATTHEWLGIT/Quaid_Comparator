@@ -78,6 +78,13 @@ class ComparatorStepInfo:
     selected_policy_fraction: Optional[float] = None
     candidate_filter_counts_json: Optional[str] = None
 
+    # Reward statistics
+    reward_distance: Optional[float] = None
+    reward_roll: Optional[float] = None
+    reward_current: Optional[float] = None
+    step_reward_total: Optional[float] = None
+    episode_reward_total: Optional[float] = None
+
 
 class InferenceStats:
     """Collects per-episode and aggregate statistics across an evaluation run."""
@@ -123,7 +130,12 @@ class InferenceStats:
                 " selected_policy_fraction REAL,"
                 " query_local_reward_mean REAL,"
                 " query_umap_x REAL,"
-                " query_umap_y REAL)"
+                " query_umap_y REAL,"
+                " reward_distance REAL,"
+                " reward_roll REAL,"
+                " reward_current REAL,"
+                " step_reward_total REAL,"
+                " episode_reward_total REAL)"
             )
             self._sqlite.commit()
 
@@ -173,8 +185,13 @@ class InferenceStats:
             " selected_policy_fraction,"
             " query_local_reward_mean,"
             " query_umap_x,"
-            " query_umap_y"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " query_umap_y,"
+            " reward_distance,"
+            " reward_roll,"
+            " reward_current,"
+            " step_reward_total,"
+            " episode_reward_total"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
@@ -191,6 +208,11 @@ class InferenceStats:
                 step_info.query_local_reward_mean,
                 step_info.query_umap_x,
                 step_info.query_umap_y,
+                step_info.reward_distance,
+                step_info.reward_roll,
+                step_info.reward_current,
+                step_info.step_reward_total,
+                step_info.episode_reward_total,
             ),
         )
 
