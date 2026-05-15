@@ -69,9 +69,6 @@ class ComparatorPlayer:
         self.comparator_assets_dir = comparator_config["comparator_assets_dir"]
         self.comparator_hyperparameters = comparator_config["hyperparameters"]
 
-        # Store the minimum interval between policy switches
-        self.min_switch_interval = int(comparator_config["hyperparameters"].get("min_switch_interval", 10))
-
         # Build the policy runners
         self.policy_runners = self._build_policy_runners()
 
@@ -138,9 +135,6 @@ class ComparatorPlayer:
         Run comparator-based policy-switching rollouts.
         """
 
-        # Store the policy history for the comparator
-        policy_history = deque(maxlen=self.comparator.sequence_length)
-
         # Ensure the environment is reset before the loop
         obs, obs_raw, _ = self.env.reset()
         time.sleep(1.0)
@@ -152,6 +146,9 @@ class ComparatorPlayer:
 
             # Reset the comparator after each episode
             self.comparator.reset()
+
+            # Store the policy history for the comparator
+            policy_history = deque(maxlen=self.comparator.sequence_length)
 
             # Reset the previous action to zero
             prev_action = np.zeros(self._action_dim, dtype=np.float32)
@@ -259,12 +256,15 @@ class ComparatorPlayer:
                     for policy in policy_history
                 )
 
+                # Extract the last step info from the comparator
+                step_info = self.comparator.last_step_info
+
                 switch_committed = False
-                can_switch = (
-                    history_is_full
-                    and history_is_policy_pure
-                    and (step - last_switch_step) >= self.min_switch_interval
-                )
+                can_switch = (history_is_full and history_is_policy_pure)
+
+                # Store the can_switch flag in the step info
+                if step_info is not None:
+                    step_info.can_switch = can_switch
 
                 if next_policy != current_policy and can_switch:
 
@@ -290,9 +290,6 @@ class ComparatorPlayer:
                         current_policy,
                         next_policy,
                     )
-
-                # Extract the last step info from the comparator
-                step_info = self.comparator.last_step_info
 
                 # Record the comparator step information if it exists
                 if step_info is not None:

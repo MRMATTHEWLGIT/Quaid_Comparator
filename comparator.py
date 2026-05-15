@@ -66,22 +66,19 @@ class CandidateMaskResult:
 
 
 @dataclass
-class CandidateScores:
+class CandidateVoteResult:
     """
-    Candidate scoring result aligned to the filtered candidate list.
+    Candidate voting result for policy selection.
+
+    candidate_indices are database row indices that passed the candidate mask.
+    policy_vote_counts maps policy key to number of valid candidate points.
     """
 
     candidate_indices: np.ndarray
-
-    overlap_values: np.ndarray
-    pairwise_values: np.ndarray
-    local_reward_values: np.ndarray
-
-    overlap_score: np.ndarray
-    pairwise_score: np.ndarray
-    local_reward_score: np.ndarray
-
-    total_score: np.ndarray
+    policy_vote_counts: dict[str, int]
+    selected_policy: str
+    selected_policy_count: int
+    selected_policy_fraction: float
 
 
 class Comparator:
@@ -132,12 +129,12 @@ class Comparator:
         self.sequence_length = int(comparator_hyperparameters.get("sequence_length", 99))
         self.min_reward_gain_percent = float(comparator_hyperparameters.get("min_reward_gain_percent", 0.0))
         self.min_distribution_overlap = comparator_hyperparameters.get("min_distribution_overlap", None)
-        
-        # Store scoring hyperparameters
-        self.overlap_weight = float(comparator_hyperparameters.get("overlap_weight", 1.0))
-        self.pairwise_weight = float(comparator_hyperparameters.get("pairwise_weight", 0.5))
-        self.local_reward_weight = float(comparator_hyperparameters.get("local_reward_weight", 1.0))
+        self.min_pairwise_agreement = comparator_hyperparameters.get("min_pairwise_agreement", None)
+        self.include_current_policy_candidates = bool(comparator_hyperparameters.get("include_current_policy_candidates", True))
+        self.min_vote_candidates = int(comparator_hyperparameters.get("min_vote_candidates", 1))
+        self.min_vote_fraction = float(comparator_hyperparameters.get("min_vote_fraction", 0.0))
 
+        # Validate the comparator hyperparameters
         if self.k_signature <= 0:
             raise ValueError("k_signature must be greater than zero.")
 
@@ -152,15 +149,16 @@ class Comparator:
 
         if self.min_distribution_overlap is not None and (self.min_distribution_overlap < 0.0 or self.min_distribution_overlap > 1.0):
             raise ValueError("min_distribution_overlap must be between 0.0 and 1.0.")
+        if self.min_pairwise_agreement is not None and (
+            self.min_pairwise_agreement < 0.0 or self.min_pairwise_agreement > 1.0
+        ):
+            raise ValueError("min_pairwise_agreement must be between 0.0 and 1.0.")
 
-        if self.overlap_weight < 0.0:
-            raise ValueError("overlap_weight must be greater than or equal to zero.")
+        if self.min_vote_candidates < 0:
+            raise ValueError("min_vote_candidates must be greater than or equal to zero.")
 
-        if self.pairwise_weight < 0.0:
-            raise ValueError("pairwise_weight must be greater than or equal to zero.")
-
-        if self.local_reward_weight < 0.0:
-            raise ValueError("local_reward_weight must be greater than or equal to zero.")
+        if self.min_vote_fraction < 0.0 or self.min_vote_fraction > 1.0:
+            raise ValueError("min_vote_fraction must be between 0.0 and 1.0.")
 
         # Store the set of valid policy keys
         self.valid_policy_keys = set(valid_policy_keys or [])
@@ -545,51 +543,6 @@ class Comparator:
             nearest_neighbour_index=nearest_neighbour_index,
         )
 
-    @staticmethod
-    def minmax_normalize(
-        values: np.ndarray,
-        valid_mask: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Normalize values to [0, 1] while safely handling invalid entries.
-        """
-
-        # Convert to consistent format
-        values = np.asarray(values, dtype=np.float64)
-
-        # Output array initialised to 0
-        normalized = np.zeros(values.shape, dtype=np.float64)
-
-        # No mask provided so only keep finite values
-        if valid_mask is None:
-            valid_mask = np.isfinite(values)
-
-        # valid_mask = valid_mask AND finite values
-        # So only keep valid finite values
-        else:
-            valid_mask = np.asarray(valid_mask, dtype=bool) & np.isfinite(values)
-
-        # No valid values
-        if not np.any(valid_mask):
-            return normalized
-
-        # Extract all valid values
-        valid_values = values[valid_mask]
-
-        # Determine the min, max and range of the valid values
-        min_value = float(np.min(valid_values))
-        max_value = float(np.max(valid_values))
-        value_range = max_value - min_value
-
-        # Range is too small, so all candidates are equally best
-        if value_range <= 1e-12:
-            normalized[valid_mask] = 1.0
-
-        # Normalise using min-max scaling
-        else:
-            normalized[valid_mask] = (valid_values - min_value) / value_range
-
-        return normalized
 
     @staticmethod
     def distribution_overlap(
@@ -686,31 +639,6 @@ class Comparator:
             )
 
         return scores
-
-    @staticmethod
-    def safe_argmax(
-        scores: np.ndarray,
-        valid_mask: np.ndarray,
-    ) -> Optional[int]:
-        """
-        Return the best valid index, or None when no valid candidates exist.
-        """
-
-        # Ensure scores are numpy array
-        scores = np.asarray(scores, dtype=np.float64)
-
-        # Generate a mask with all valid finite scores
-        valid_mask = np.asarray(valid_mask, dtype=bool) & np.isfinite(scores)
-
-        # No valid finite entries exist
-        if not np.any(valid_mask):
-            return None
-
-        # Ensures invalid entries are not counted by argmax
-        masked_scores = np.where(valid_mask, scores, -np.inf)
-
-        # Index of the highest valid score
-        return int(np.argmax(masked_scores))
 
 
     def _normalise_query_sequence(self) -> np.ndarray:
@@ -886,9 +814,13 @@ class Comparator:
         candidate_mask = np.ones(n_memory_points, dtype=bool)
         counts["all_memory_points"] = int(candidate_mask.sum())
 
-        # Set-up mask to allow only points not of the same policy as the query
-        candidate_mask &= self.policy_keys != query_stats.query_policy
-        counts["after_different_policy"] = int(candidate_mask.sum())
+        # Optionally remove points from the current policy.
+        if not self.include_current_policy_candidates:
+            candidate_mask &= self.policy_keys != query_stats.query_policy
+            counts["after_different_policy"] = int(candidate_mask.sum())
+
+        else:
+            counts["after_policy_filter"] = int(candidate_mask.sum())
 
         # Calculate the reward margin for the query
         reward_margin = abs(query_stats.local_reward_mean) * (
@@ -918,79 +850,109 @@ class Comparator:
             candidate_mask &= distribution_overlap >= float(self.min_distribution_overlap)
             counts["after_distribution_overlap_filter"] = int(candidate_mask.sum())
 
+        # Optional minimum pairwise distribution agreement filter
+        if self.min_pairwise_agreement is not None:
+
+            # Calculate the pairwise agreement between the query and memory points
+            pairwise_agreement = self.pairwise_distribution_agreement(
+                query_stats.local_condition_distribution,
+                self.lookup_table.local_condition_distributions,
+            )
+
+            candidate_mask &= pairwise_agreement >= float(self.min_pairwise_agreement)
+            counts["after_pairwise_agreement_filter"] = int(candidate_mask.sum())
+
         return CandidateMaskResult(
             candidate_mask=candidate_mask,
             counts=counts,
             distribution_overlap=distribution_overlap,
         )
 
-    def score_candidates(
+
+    def vote_for_policy(
         self,
-        query_stats: QueryStatistics,
+        *,
+        current_policy: str,
         candidate_mask: np.ndarray,
-    ) -> CandidateScores:
+    ) -> CandidateVoteResult:
         """
-        Score all candidates using the runtime Comparator scoring formula.
+        Select a policy by counting how many valid candidate points belong to each
+        policy.
+
+        Ties are resolved by keeping the current policy if it is tied for first.
+        Otherwise, the tied policy with the highest mean local reward is selected.
         """
 
         # Get the database indices of the candidate points
         candidate_indices = np.where(candidate_mask)[0]
 
-        # No valid candidates exist, so return empty scores
+        # No valid candidates exist, so return empty vote result
         if len(candidate_indices) == 0:
-            empty = np.array([], dtype=np.float64)
-
-            return CandidateScores(
-                candidate_indices=candidate_indices,
-                overlap_values=empty,
-                pairwise_values=empty,
-                local_reward_values=empty,
-                overlap_score=empty,
-                pairwise_score=empty,
-                local_reward_score=empty,
-                total_score=empty,
+            return CandidateVoteResult(
+                candidate_indices=np.array([], dtype=np.int64),
+                policy_vote_counts={},
+                selected_policy=str(current_policy),
+                selected_policy_count=0,
+                selected_policy_fraction=0.0,
             )
 
-        # Get the local condition distributions of the candidate points
-        candidate_distributions = (
-            self.lookup_table.local_condition_distributions[candidate_indices]
-        )
+        # Get the policies of the candidate points
+        candidate_policies = self.policy_keys[candidate_indices].astype(str)
 
-        # Calculate the overlap score between the query and candidate distributions
-        overlap_score = self.distribution_overlap(
-            query_stats.local_condition_distribution,
-            candidate_distributions,
-        )
+        # Count the number of candidate points for each policy
+        policy_vote_counts = {
+            str(policy): int(np.sum(candidate_policies == str(policy)))
+            for policy in sorted(np.unique(candidate_policies))
+        }
 
-        # Calculate the pairwise distribution agreement between the query and candidate distributions
-        pairwise_score = self.pairwise_distribution_agreement(
-            query_stats.local_condition_distribution,
-            candidate_distributions,
-        )
+        # Get the policy with the most candidate points
+        max_count = max(policy_vote_counts.values())
 
-        # Get the local reward values of the candidate points
-        local_reward_values = self.lookup_table.local_reward_mean[candidate_indices]
+        # Get the policies that are tied for the most candidate points
+        tied_policies = [
+            policy
+            for policy, count in policy_vote_counts.items()
+            if count == max_count
+        ]
 
-        # Normalise the local reward score to between [0, 1]
-        local_reward_score = self.minmax_normalize(local_reward_values)
+        # Prefer staying with the current policy if it is tied for first.
+        if str(current_policy) in tied_policies:
+            selected_policy = str(current_policy)
 
-        # Calculate the total score for the candidate points
-        total_score = (
-            self.overlap_weight * overlap_score
-            + self.pairwise_weight * pairwise_score
-            + self.local_reward_weight * local_reward_score
-        )
+        else:
+            # Otherwise, break ties using mean local reward among candidates
+            # belonging to each tied policy.
+            tied_policy_reward_means = {}
 
-        # Create and return the candidate scores
-        return CandidateScores(
+            for policy in tied_policies:
+
+                # Get the database indices of the candidate points for the current policy
+                policy_indices = candidate_indices[candidate_policies == policy]
+
+                # Calculate the mean local reward for the current policy
+                tied_policy_reward_means[policy] = float(
+                    np.mean(self.lookup_table.local_reward_mean[policy_indices])
+                )
+
+            # Get the policy with the highest mean local reward
+            selected_policy = max(
+                tied_policy_reward_means,
+                key=tied_policy_reward_means.get,
+            )
+
+        # Get the number of candidate points for the selected policy
+        selected_policy_count = int(policy_vote_counts[selected_policy])
+
+        # Calculate the fraction of candidate points for the selected policy
+        selected_policy_fraction = float(selected_policy_count / len(candidate_indices))
+
+        # Create and return the candidate vote result
+        return CandidateVoteResult(
             candidate_indices=np.asarray(candidate_indices, dtype=np.int64),
-            overlap_values=np.asarray(overlap_score, dtype=np.float64),
-            pairwise_values=np.asarray(pairwise_score, dtype=np.float64),
-            local_reward_values=np.asarray(local_reward_values, dtype=np.float64),
-            overlap_score=np.asarray(overlap_score, dtype=np.float64),
-            pairwise_score=np.asarray(pairwise_score, dtype=np.float64),
-            local_reward_score=np.asarray(local_reward_score, dtype=np.float64),
-            total_score=np.asarray(total_score, dtype=np.float64),
+            policy_vote_counts=policy_vote_counts,
+            selected_policy=selected_policy,
+            selected_policy_count=selected_policy_count,
+            selected_policy_fraction=selected_policy_fraction,
         )
 
     def select_policy(
@@ -999,16 +961,16 @@ class Comparator:
         current_policy: str,
         step: int,
     ) -> str:
-        """
+        f"""
         Select the policy to use at the next timestep.
 
         The comparator:
-        1. embeds the live obs_t + action_t history,
+        1. embeds the live obs_(t + 1) + action_t history,
         2. projects the query into UMAP space,
         3. computes query-local statistics,
         4. builds a candidate mask,
-        5. scores valid candidate points,
-        6. returns the policy key of the best candidate.
+        5. counts valid candidates per policy,
+        6. returns the policy key with the strongest candidate support.
 
         If the comparator cannot make a valid decision, the current policy is kept.
         """
@@ -1019,15 +981,16 @@ class Comparator:
             current_policy=str(current_policy),
             next_policy=str(current_policy),
             switch_committed=False,
+            can_switch=False,
             candidate_count=0,
-            best_idx=None,
-            best_score=None,
             query_local_reward_mean=None,
-            best_candidate_local_reward_mean=None,
-            best_candidate_policy=None,
-            best_candidate_condition=None,
             query_umap_x=None,
             query_umap_y=None,
+            candidate_indices_json=None,
+            policy_vote_counts_json=None,
+            selected_policy_count=None,
+            selected_policy_fraction=None,
+            candidate_filter_counts_json=None,
         )
 
         # Compute the live query statistics from the current history buffer
@@ -1050,17 +1013,26 @@ class Comparator:
 
         # Build the candidate mask based on query-vs-memory criteria
         candidate_mask_result = self.build_candidate_mask(query_stats)
+        self.last_step_info.candidate_filter_counts_json = json.dumps(candidate_mask_result.counts)
 
-        # Score all valid candidate points
-        candidate_scores = self.score_candidates(
-            query_stats=query_stats,
+        # Vote over all valid candidate points
+        vote_result = self.vote_for_policy(
+            current_policy=current_policy,
             candidate_mask=candidate_mask_result.candidate_mask,
         )
 
-        self.last_step_info.candidate_count = int(len(candidate_scores.total_score))
+        self.last_step_info.candidate_count = int(len(vote_result.candidate_indices))
+
+        # Not enough candidates to vote, so keep using the current policy
+        if len(vote_result.candidate_indices) < self.min_vote_candidates:
+            return current_policy
+
+        # Not enough candidate support for the selected policy, so keep using the current policy
+        if vote_result.selected_policy_fraction < self.min_vote_fraction:
+            return current_policy
 
         # No valid candidates exist, so keep using the current policy
-        if len(candidate_scores.total_score) == 0:
+        if len(vote_result.candidate_indices) == 0:
             log.debug(
                 "Comparator step=%d current=%s no valid candidates counts=%s",
                 step,
@@ -1070,46 +1042,28 @@ class Comparator:
 
             return current_policy
 
-        # Every returned candidate score is valid at this stage
-        valid_score_mask = np.ones(len(candidate_scores.total_score), dtype=bool)
+        # Get the selected policy from the vote result
+        next_policy = str(vote_result.selected_policy)
 
-        # Select the best valid candidate score
-        best_position = self.safe_argmax(
-            candidate_scores.total_score,
-            valid_score_mask,
-        )
-
-        # No best candidate found, so keep using the current policy
-        if best_position is None:
-            return current_policy
-
-        # Convert from filtered candidate-list position to database row index
-        best_candidate_idx = int(candidate_scores.candidate_indices[best_position])
-
-        # Read the policy key associated with the selected historical candidate
-        next_policy = str(self.policy_keys[best_candidate_idx])
-
-        # Store debug info for logging
+        # Store statistics to keep track of the comparator's decision
         self.last_step_info.next_policy = next_policy
-        self.last_step_info.candidate_count = int(len(candidate_scores.total_score))
-        self.last_step_info.best_idx = best_candidate_idx
-        self.last_step_info.best_score = float(candidate_scores.total_score[best_position])
-        self.last_step_info.query_local_reward_mean = float(query_stats.local_reward_mean)
-        self.last_step_info.best_candidate_local_reward_mean = float(
-            self.lookup_table.local_reward_mean[best_candidate_idx]
-        )
-        self.last_step_info.best_candidate_policy = str(self.policy_keys[best_candidate_idx])
-        self.last_step_info.best_candidate_condition = str(self.condition_names[best_candidate_idx])
+        self.last_step_info.candidate_count = int(len(vote_result.candidate_indices))
+        self.last_step_info.candidate_indices_json = json.dumps(vote_result.candidate_indices.astype(int).tolist())
+        self.last_step_info.policy_vote_counts_json = json.dumps(vote_result.policy_vote_counts)
+        self.last_step_info.selected_policy_count = int(vote_result.selected_policy_count)
+        self.last_step_info.selected_policy_fraction = float(vote_result.selected_policy_fraction)
 
+        # Log the comparator's decision
         log.debug(
-            "Comparator step=%d current=%s next=%s candidates=%d best_idx=%d "
-            "best_score=%.4f counts=%s",
+            "Comparator vote step=%d current=%s next=%s candidates=%d votes=%s "
+            "selected_count=%d selected_fraction=%.3f counts=%s",
             step,
             current_policy,
             next_policy,
-            len(candidate_scores.total_score),
-            best_candidate_idx,
-            float(candidate_scores.total_score[best_position]),
+            len(vote_result.candidate_indices),
+            vote_result.policy_vote_counts,
+            vote_result.selected_policy_count,
+            vote_result.selected_policy_fraction,
             candidate_mask_result.counts,
         )
 

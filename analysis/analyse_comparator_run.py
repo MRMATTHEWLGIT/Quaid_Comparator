@@ -143,6 +143,32 @@ def load_metadata(metadata_path: str | Path) -> dict:
         return json.load(file)
 
 
+def parse_json_cell(value, default):
+    """
+    Safely parse a JSON value stored in a SQLite text column.
+    """
+
+    if value is None:
+        return default
+
+    if isinstance(value, float) and np.isnan(value):
+        return default
+
+    if isinstance(value, (dict, list)):
+        return value
+
+    value = str(value).strip()
+
+    if value == "":
+        return default
+
+    try:
+        return json.loads(value)
+
+    except json.JSONDecodeError:
+        return default
+
+
 # -------------------------------------------------------------------------
 # Label helpers
 # -------------------------------------------------------------------------
@@ -203,34 +229,179 @@ def add_database_labels(database: dict, metadata: dict) -> dict:
     return database
 
 
-# -------------------------------------------------------------------------
-# Enrichment helpers
-# -------------------------------------------------------------------------
-
-def add_best_candidate_umap_coordinates(
-    df: pd.DataFrame,
-    database: dict,
-) -> pd.DataFrame:
+def add_vote_count_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add best-candidate UMAP coordinates using best_idx.
+    Expand policy_vote_counts_json into one numeric column per policy.
     """
 
     df = df.copy()
 
-    umap_embeddings = database["umap_embeddings"]
+    if "policy_vote_counts_json" not in df.columns:
+        return df
 
-    df["best_candidate_umap_x"] = np.nan
-    df["best_candidate_umap_y"] = np.nan
+    parsed_counts = df["policy_vote_counts_json"].apply(
+        lambda value: parse_json_cell(value, default={})
+    )
 
-    valid = df["best_idx"].notna()
+    all_policies = sorted(
+        {
+            str(policy)
+            for counts in parsed_counts
+            if isinstance(counts, dict)
+            for policy in counts.keys()
+        }
+    )
 
-    best_indices = df.loc[valid, "best_idx"].astype(int).to_numpy()
+    for policy in all_policies:
+        column_name = f"vote_count_{policy}"
 
-    df.loc[valid, "best_candidate_umap_x"] = umap_embeddings[best_indices, 0]
-    df.loc[valid, "best_candidate_umap_y"] = umap_embeddings[best_indices, 1]
+        df[column_name] = parsed_counts.apply(
+            lambda counts, policy=policy: int(counts.get(policy, 0))
+            if isinstance(counts, dict)
+            else 0
+        )
 
     return df
 
+
+def add_candidate_filter_count_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expand candidate_filter_counts_json into one numeric column per filter stage.
+    """
+
+    df = df.copy()
+
+    if "candidate_filter_counts_json" not in df.columns:
+        return df
+
+    parsed_counts = df["candidate_filter_counts_json"].apply(
+        lambda value: parse_json_cell(value, default={})
+    )
+
+    all_filter_keys = sorted(
+        {
+            str(key)
+            for counts in parsed_counts
+            if isinstance(counts, dict)
+            for key in counts.keys()
+        }
+    )
+
+    for key in all_filter_keys:
+        column_name = f"filter_count_{key}"
+
+        df[column_name] = parsed_counts.apply(
+            lambda counts, key=key: int(counts.get(key, 0))
+            if isinstance(counts, dict)
+            else 0
+        )
+
+    return df
+
+
+def add_candidate_umap_summary_columns(
+    df: pd.DataFrame,
+    database: dict,
+) -> pd.DataFrame:
+    """
+    Add candidate-set UMAP summary columns using candidate_indices_json.
+
+    Since voting no longer has one best candidate, this function stores the
+    centroid of all valid candidates and the centroid of candidates belonging
+    to the selected/next policy.
+    """
+
+    df = df.copy()
+
+    if "candidate_indices_json" not in df.columns:
+        return df
+
+    umap_embeddings = database["umap_embeddings"]
+    database_policy_keys = database["policy_keys"].astype(str)
+
+    summary_columns = [
+        "candidate_umap_centroid_x",
+        "candidate_umap_centroid_y",
+        "selected_policy_candidate_umap_centroid_x",
+        "selected_policy_candidate_umap_centroid_y",
+    ]
+
+    for column in summary_columns:
+        df[column] = np.nan
+
+    for row_index, row in df.iterrows():
+
+        candidate_indices = parse_json_cell(
+            row.get("candidate_indices_json"),
+            default=[],
+        )
+
+        if not isinstance(candidate_indices, list) or len(candidate_indices) == 0:
+            continue
+
+        candidate_indices = np.asarray(candidate_indices, dtype=np.int64)
+
+        valid_index_mask = (
+            (candidate_indices >= 0)
+            & (candidate_indices < len(umap_embeddings))
+        )
+
+        candidate_indices = candidate_indices[valid_index_mask]
+
+        if len(candidate_indices) == 0:
+            continue
+
+        candidate_points = umap_embeddings[candidate_indices]
+
+        df.at[row_index, "candidate_umap_centroid_x"] = float(
+            np.mean(candidate_points[:, 0])
+        )
+        df.at[row_index, "candidate_umap_centroid_y"] = float(
+            np.mean(candidate_points[:, 1])
+        )
+
+        selected_policy = str(row.get("next_policy"))
+        selected_policy_mask = database_policy_keys[candidate_indices] == selected_policy
+
+        if not np.any(selected_policy_mask):
+            continue
+
+        selected_points = candidate_points[selected_policy_mask]
+
+        df.at[row_index, "selected_policy_candidate_umap_centroid_x"] = float(
+            np.mean(selected_points[:, 0])
+        )
+        df.at[row_index, "selected_policy_candidate_umap_centroid_y"] = float(
+            np.mean(selected_points[:, 1])
+        )
+
+    return df
+
+
+def enrich_voting_steps(
+    steps_df: pd.DataFrame,
+    database: dict,
+) -> pd.DataFrame:
+    """
+    Add voting-specific analysis columns to comparator_steps.
+    """
+
+    steps_df = steps_df.copy()
+
+    steps_df = add_vote_count_columns(steps_df)
+    steps_df = add_candidate_filter_count_columns(steps_df)
+    steps_df = add_candidate_umap_summary_columns(
+        df=steps_df,
+        database=database,
+    )
+
+    if {"selected_policy_count", "candidate_count"}.issubset(steps_df.columns):
+        candidate_count = steps_df["candidate_count"].replace(0, np.nan)
+        steps_df["selected_policy_fraction_recomputed"] = (
+            steps_df["selected_policy_count"] / candidate_count
+        )
+
+    return steps_df
 
 # -------------------------------------------------------------------------
 # Plotting helpers
@@ -407,6 +578,91 @@ def plot_query_trajectory(
     plt.close(fig)
 
 
+def plot_vote_counts_over_time(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+) -> None:
+    """
+    Plot policy vote counts over time for one episode.
+
+    Vote lines are shown with normal opacity when can_switch is active, and
+    low opacity when the comparator is blocked by the switching gate.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    vote_columns = [
+        column
+        for column in steps_df.columns
+        if column.startswith("vote_count_")
+    ]
+
+    if len(vote_columns) == 0:
+        return
+
+    episode_df = steps_df.sort_values("step").copy()
+
+    # If older databases do not have can_switch, treat all points as active.
+    if "can_switch" in episode_df.columns:
+        can_switch_mask = episode_df["can_switch"].astype(bool).to_numpy()
+    else:
+        can_switch_mask = np.ones(len(episode_df), dtype=bool)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    for column in vote_columns:
+        policy = column.replace("vote_count_", "")
+
+        x_values = episode_df["step"].to_numpy()
+        y_values = episode_df[column].to_numpy(dtype=float)
+
+        # Active section: normal opacity
+        y_active = y_values.copy()
+        y_active[~can_switch_mask] = np.nan
+
+        ax.plot(
+            x_values,
+            y_active,
+            linewidth=1.8,
+            alpha=1.0,
+            label=policy,
+        )
+
+        # Inactive section: transparent/faded
+        y_inactive = y_values.copy()
+        y_inactive[can_switch_mask] = np.nan
+
+        ax.plot(
+            x_values,
+            y_inactive,
+            linewidth=1.5,
+            alpha=0.18,
+            label="_nolegend_",
+        )
+
+    if "switch_committed" in episode_df.columns:
+        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+        for _, row in switch_df.iterrows():
+            ax.axvline(
+                x=row["step"],
+                linewidth=1.0,
+                alpha=0.35,
+            )
+
+    episode_no = int(episode_df["episode_no"].iloc[0])
+
+    ax.set_title(f"Comparator Policy Vote Counts - Episode {episode_no}")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Candidate votes")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 # -------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------
@@ -446,8 +702,8 @@ def main() -> int:
     metadata = load_metadata(paths["metadata_path"])
     database = add_database_labels(database, metadata)
 
-    steps_df = add_best_candidate_umap_coordinates(
-        df=steps_df,
+    steps_df = enrich_voting_steps(
+        steps_df=steps_df,
         database=database,
     )
 
@@ -481,6 +737,15 @@ def main() -> int:
             database=database,
             steps_df=episode_df,
             output_path=query_trajectory_plot_path,
+        )
+
+        vote_counts_plot_path = (
+            episode_plot_dir / f"episode_{int(episode_no):03d}_policy_vote_counts.png"
+        )
+
+        plot_vote_counts_over_time(
+            steps_df=episode_df,
+            output_path=vote_counts_plot_path,
         )
 
         saved_plot_paths.extend([

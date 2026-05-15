@@ -63,18 +63,20 @@ class ComparatorStepInfo:
     current_policy: str
     next_policy: str
     switch_committed: bool
+    can_switch: bool
 
     candidate_count: int
-    best_idx: Optional[int]
-    best_score: Optional[float]
 
     query_local_reward_mean: Optional[float]
-    best_candidate_local_reward_mean: Optional[float]
-    best_candidate_policy: Optional[str]
-    best_candidate_condition: Optional[str]
 
     query_umap_x: Optional[float]
     query_umap_y: Optional[float]
+
+    candidate_indices_json: Optional[str] = None
+    policy_vote_counts_json: Optional[str] = None
+    selected_policy_count: Optional[int] = None
+    selected_policy_fraction: Optional[float] = None
+    candidate_filter_counts_json: Optional[str] = None
 
 
 class InferenceStats:
@@ -112,13 +114,14 @@ class InferenceStats:
                 " current_policy TEXT,"
                 " next_policy TEXT,"
                 " switch_committed INTEGER,"
+                " can_switch INTEGER,"
                 " candidate_count INTEGER,"
-                " best_idx INTEGER,"
-                " best_score REAL,"
+                " candidate_filter_counts_json TEXT,"
+                " candidate_indices_json TEXT,"
+                " policy_vote_counts_json TEXT,"
+                " selected_policy_count INTEGER,"
+                " selected_policy_fraction REAL,"
                 " query_local_reward_mean REAL,"
-                " best_candidate_local_reward_mean REAL,"
-                " best_candidate_policy TEXT,"
-                " best_candidate_condition TEXT,"
                 " query_umap_x REAL,"
                 " query_umap_y REAL)"
             )
@@ -161,29 +164,31 @@ class InferenceStats:
             " current_policy,"
             " next_policy,"
             " switch_committed,"
+            " can_switch,"
             " candidate_count,"
-            " best_idx,"
-            " best_score,"
+            " candidate_filter_counts_json,"
+            " candidate_indices_json,"
+            " policy_vote_counts_json,"
+            " selected_policy_count,"
+            " selected_policy_fraction,"
             " query_local_reward_mean,"
-            " best_candidate_local_reward_mean,"
-            " best_candidate_policy,"
-            " best_candidate_condition,"
             " query_umap_x,"
             " query_umap_y"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
                 str(step_info.current_policy),
                 str(step_info.next_policy),
                 int(bool(step_info.switch_committed)),
+                int(bool(step_info.can_switch)),
                 int(step_info.candidate_count),
-                step_info.best_idx,
-                step_info.best_score,
+                step_info.candidate_filter_counts_json,
+                step_info.candidate_indices_json,
+                step_info.policy_vote_counts_json,
+                step_info.selected_policy_count,
+                step_info.selected_policy_fraction,
                 step_info.query_local_reward_mean,
-                step_info.best_candidate_local_reward_mean,
-                step_info.best_candidate_policy,
-                step_info.best_candidate_condition,
                 step_info.query_umap_x,
                 step_info.query_umap_y,
             ),
