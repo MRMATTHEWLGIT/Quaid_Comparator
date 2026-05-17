@@ -1034,6 +1034,360 @@ def plot_switch_reward_delta(
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
+
+def infer_episode_label(episode_df: pd.DataFrame) -> str:
+    """
+    Infer whether an episode was fixed-policy or comparator-controlled.
+    """
+
+    first_policy = str(episode_df["current_policy"].iloc[0])
+
+    if "can_switch" in episode_df.columns and episode_df["can_switch"].astype(bool).any():
+        return "comparator"
+
+    return first_policy
+
+
+def plot_final_reward_per_episode(steps_df: pd.DataFrame, output_path: str | Path) -> None:
+    """
+    Plot final episode reward for each episode.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    records = []
+
+    for episode_no, episode_df in steps_df.groupby("episode_no"):
+
+        episode_df = episode_df.sort_values("step").copy()
+
+        if "episode_reward_total" in episode_df.columns:
+            final_reward = float(episode_df["episode_reward_total"].iloc[-1])
+        else:
+            final_reward = float(episode_df["step_reward_total"].sum())
+
+        records.append({
+            "episode_no": int(episode_no),
+            "episode_label": infer_episode_label(episode_df),
+            "final_reward": final_reward,
+        })
+
+    summary_df = pd.DataFrame(records)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    x = np.arange(len(summary_df))
+
+    ax.bar(x, summary_df["final_reward"])
+
+    ax.set_title("Final Cumulative Reward Per Episode")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Final cumulative reward")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [
+            f"Ep {row.episode_no}\n{row.episode_label}"
+            for row in summary_df.itertuples()
+        ]
+    )
+
+    ax.grid(axis="y", alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_cumulative_reward_curves(steps_df: pd.DataFrame, output_path: str | Path) -> None:
+    """
+    Plot cumulative reward curves for all episodes on one figure.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+
+    for episode_no, episode_df in steps_df.groupby("episode_no"):
+
+        episode_df = episode_df.sort_values("step").copy()
+        episode_label = infer_episode_label(episode_df)
+
+        if "episode_reward_total" in episode_df.columns:
+            cumulative_reward = episode_df["episode_reward_total"]
+        else:
+            cumulative_reward = episode_df["step_reward_total"].cumsum()
+
+        ax.plot(
+            episode_df["step"],
+            cumulative_reward,
+            linewidth=1.8,
+            label=f"Ep {int(episode_no)} ({episode_label})",
+        )
+
+    ax.set_title("Cumulative Reward Curves")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Cumulative reward")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_policy_occupancy_per_episode(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+) -> None:
+    """
+    Plot policy occupancy fraction for each episode as stacked bars.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    policies = sorted(steps_df["current_policy"].astype(str).unique())
+
+    records = []
+
+    for episode_no, episode_df in steps_df.groupby("episode_no"):
+
+        episode_df = episode_df.copy()
+        total_steps = len(episode_df)
+
+        record = {
+            "episode_no": int(episode_no),
+            "episode_label": infer_episode_label(episode_df),
+        }
+
+        for policy in policies:
+            record[policy] = float(
+                (episode_df["current_policy"].astype(str) == policy).sum()
+                / total_steps
+            )
+
+        records.append(record)
+
+    occupancy_df = pd.DataFrame(records)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    x = np.arange(len(occupancy_df))
+    bottom = np.zeros(len(occupancy_df))
+
+    for policy in policies:
+
+        values = occupancy_df[policy].to_numpy(dtype=float)
+
+        ax.bar(
+            x,
+            values,
+            bottom=bottom,
+            label=policy,
+        )
+
+        bottom += values
+
+    ax.set_title("Policy Occupancy Per Episode")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Fraction of timesteps")
+    ax.set_ylim(0.0, 1.0)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [
+            f"Ep {row.episode_no}\n{row.episode_label}"
+            for row in occupancy_df.itertuples()
+        ]
+    )
+
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_policy_timeline(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+) -> None:
+    """
+    Plot active policy timeline for one episode.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    episode_df = steps_df.sort_values("step").copy()
+
+    policies = sorted(episode_df["current_policy"].astype(str).unique())
+    policy_to_y = {
+        policy: index
+        for index, policy in enumerate(policies)
+    }
+
+    y_values = episode_df["current_policy"].astype(str).map(policy_to_y)
+
+    episode_no = int(episode_df["episode_no"].iloc[0])
+    episode_label = infer_episode_label(episode_df)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+
+    ax.plot(
+        episode_df["step"],
+        y_values,
+        linewidth=2.0,
+    )
+
+    if "switch_committed" in episode_df.columns:
+
+        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+        if len(switch_df) > 0:
+            switch_y = switch_df["current_policy"].astype(str).map(policy_to_y)
+
+            ax.scatter(
+                switch_df["step"],
+                switch_y,
+                marker="x",
+                s=120,
+                linewidths=2.5,
+                label="Committed switch",
+                zorder=5,
+            )
+
+    ax.set_title(f"Policy Timeline - Episode {episode_no} ({episode_label})")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Active policy")
+
+    ax.set_yticks(list(policy_to_y.values()))
+    ax.set_yticklabels(list(policy_to_y.keys()))
+
+    ax.grid(True, alpha=0.25)
+    handles, labels = ax.get_legend_handles_labels()
+
+    if len(handles) > 0:
+        ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_aggregate_reward_rate(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    rolling_window: int = 50,
+) -> None:
+    """
+    Plot rolling reward rate for all episodes on one aggregate plot.
+
+    Each episode is shown as one line. Comparator switch events are marked
+    with an 'x' marker on the corresponding episode line.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required_columns = {
+        "episode_no",
+        "step",
+        "step_reward_total",
+    }
+
+    if not required_columns.issubset(steps_df.columns):
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for episode_no, episode_df in steps_df.groupby("episode_no"):
+
+        episode_df = episode_df.sort_values("step").copy()
+
+        episode_df["reward_rate_smooth"] = (
+            episode_df["step_reward_total"]
+            .rolling(
+                window=rolling_window,
+                min_periods=1,
+                center=True,
+            )
+            .mean()
+        )
+
+        episode_label = infer_episode_label(episode_df)
+
+        is_comparator_episode = (str(episode_label).strip().lower() == "comparator")
+
+        line, = ax.plot(
+            episode_df["step"],
+            episode_df["reward_rate_smooth"],
+            label=f"Ep {int(episode_no)} ({episode_label})",
+            zorder=4 if is_comparator_episode else 3,
+        )
+
+        if is_comparator_episode:
+            line.set_linestyle("-")
+            line.set_alpha(1.0)
+            line.set_linewidth(2.4)
+        else:
+            line.set_linestyle("-")
+            line.set_alpha(0.55)
+            line.set_linewidth(1.8)
+
+
+        if "switch_committed" in episode_df.columns:
+
+            switch_df = episode_df[
+                episode_df["switch_committed"].astype(int) == 1
+            ]
+
+            if len(switch_df) > 0:
+
+                ax.scatter(
+                    switch_df["step"],
+                    switch_df["reward_rate_smooth"],
+                    marker="X",
+                    s=180,
+                    facecolors=line.get_color(),
+                    edgecolors="black",
+                    linewidths=1.8,
+                    zorder=6,
+                )
+
+    ax.set_title(
+        f"Aggregate Rolling Reward Rate Across Episodes "
+        f"(window={rolling_window})"
+    )
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Raw rolling step reward")
+
+    ax.grid(True, alpha=0.25)
+
+    # Add one dummy marker so the legend explains the switch symbols.
+    ax.scatter(
+        [],
+        [],
+        marker="X",
+        s=180,
+        facecolors="white",
+        edgecolors="black",
+        linewidths=1.8,
+        label="Committed comparator switch",
+    )
+
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 # -------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------
@@ -1082,6 +1436,31 @@ def main() -> int:
     csv_path = output_dir / "comparator_steps_enriched.csv"
     steps_df.to_csv(csv_path, index=False)
 
+    # Save aggregate multi-episode plots
+    aggregate_plot_dir = output_dir / "aggregate"
+    aggregate_plot_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_final_reward_per_episode(
+        steps_df=steps_df,
+        output_path=aggregate_plot_dir / "final_reward_per_episode.png",
+    )
+
+    plot_cumulative_reward_curves(
+        steps_df=steps_df,
+        output_path=aggregate_plot_dir / "cumulative_reward_curves.png",
+    )
+
+    plot_policy_occupancy_per_episode(
+        steps_df=steps_df,
+        output_path=aggregate_plot_dir / "policy_occupancy_per_episode.png",
+    )
+
+    plot_aggregate_reward_rate(
+        steps_df=steps_df,
+        output_path=aggregate_plot_dir / "aggregate_reward_rate.png",
+        rolling_window=50,
+    )
+
     # Save per-episode plots
     episode_root_dir = output_dir / "episodes"
     episode_root_dir.mkdir(parents=True, exist_ok=True)
@@ -1118,6 +1497,11 @@ def main() -> int:
 
         vote_counts_plot_path = (
             episode_plot_dir / "policy_vote_counts.png"
+        )
+        
+        plot_policy_timeline(
+            steps_df=episode_df,
+            output_path=episode_plot_dir / "policy_timeline.png",
         )
 
         plot_vote_counts_over_time(
