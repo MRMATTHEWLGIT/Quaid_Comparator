@@ -36,7 +36,7 @@ class ComparatorPlayer:
         embedding_gru_layers: int = 3,
         embedding_gru_hidden_size: int = 64,
         output_dir: Optional[str] = None,
-        test_episodes: int = 5,
+        test_episodes: int | None = None,
         max_test_steps: int = 500,
         test_step_delay_ms: int = 0,
         device: str = "cpu",
@@ -68,6 +68,13 @@ class ComparatorPlayer:
         self.policy_configs = comparator_config["policies"]
         self.comparator_assets_dir = comparator_config["comparator_assets_dir"]
         self.comparator_hyperparameters = comparator_config["hyperparameters"]
+
+        # Load the episode playbook. The playbook controls both the episode count and
+        # whether each episode is run as a fixed-policy baseline or comparator episode.
+        self.episode_playbook = self._load_episode_playbook()
+
+        # The number of episodes is determined by the playbook length
+        self.test_episodes = len(self.episode_playbook)
 
         # Build the policy runners
         self.policy_runners = self._build_policy_runners()
@@ -113,6 +120,55 @@ class ComparatorPlayer:
 
         return policy_runners
 
+
+    def _load_episode_playbook(self) -> list[str]:
+        """
+        Load and validate the episode playbook from comparator_config.
+
+        Each playbook entry must either be:
+            - "comparator", meaning run the comparator normally from initial_policy
+            - a policy key, meaning run that fixed policy for the whole episode
+        """
+
+        # No episode playbook was provided
+        if "episode_playbook" not in self.comparator_config:
+            raise KeyError(
+                "Comparator config is missing required key 'episode_playbook'. "
+                "Example: episode_playbook: [flat, ramp, uneven, comparator]"
+            )
+
+        # Extract the episode playbook from the comparator config
+        episode_playbook = self.comparator_config["episode_playbook"]
+
+        # Validate the episode playbook
+        if not isinstance(episode_playbook, list):
+            raise TypeError("episode_playbook must be a list.")
+        if len(episode_playbook) == 0:
+            raise ValueError("episode_playbook must contain at least one episode entry.")
+
+        # Build the set of valid policy keys and the comparator key
+        valid_entries = set(self.policy_configs.keys())
+        valid_entries.add("comparator")
+
+        cleaned_playbook = []
+
+        for index, entry in enumerate(episode_playbook):
+
+            entry = str(entry)
+
+            # Not a valid policy key or comparator key
+            if entry not in valid_entries:
+                raise ValueError(
+                    f"Invalid episode_playbook entry at index {index}: '{entry}'. "
+                    f"Expected one of: {sorted(valid_entries)}"
+                )
+
+            # Add the valid entry to the cleaned playbook
+            cleaned_playbook.append(entry)
+
+        # Return the cleaned playbook
+        return cleaned_playbook
+
     
     def _build_comparator(self) -> Comparator:
         """
@@ -139,13 +195,16 @@ class ComparatorPlayer:
         obs, obs_raw, _ = self.env.reset()
         time.sleep(1.0)
 
-        for episode_no in range(self.test_episodes):
+        for episode_no, playbook_entry in enumerate(self.episode_playbook):
 
             # Reset the environment after each episode
             obs, obs_raw, _ = self.env.reset()
 
             # Reset the comparator after each episode
             self.comparator.reset()
+
+            # Determine whether this episode should use the comparator or a fixed policy
+            episode_uses_comparator = playbook_entry == "comparator"
 
             # Store the policy history for the comparator
             policy_history = deque(maxlen=self.comparator.sequence_length)
@@ -159,8 +218,20 @@ class ComparatorPlayer:
                 dtype=np.float32,
             )
 
-            # Start from the configured initial policy
-            current_policy = self.initial_policy
+            # Start either from the configured initial policy for comparator episodes,
+            # or from the fixed policy requested by the playbook.
+            if episode_uses_comparator:
+                current_policy = self.initial_policy
+            else:
+                current_policy = playbook_entry
+
+            log.info(
+                "Starting episode %d/%d using playbook entry '%s' with initial policy '%s'.",
+                episode_no + 1,
+                self.test_episodes,
+                playbook_entry,
+                current_policy,
+            )
 
             episode_start = time.perf_counter()
             inference_times: list[int] = []
@@ -256,13 +327,24 @@ class ComparatorPlayer:
 
                 self.comparator.update_query_history(comparator_state)
 
-                next_policy = self.comparator.select_policy(
+                # Run the comparator every step so that fixed-policy baseline episodes
+                # still produce query embeddings, vote counts, UMAP coordinates, and
+                # reward logs. For fixed-policy episodes, the comparator decision is
+                # recorded for analysis but is not allowed to change the active policy.
+                proposed_policy = self.comparator.select_policy(
                     current_policy=current_policy,
                     step=step,
                 )
 
-                if next_policy not in self.policy_runners:
-                    raise KeyError(f"Comparator selected unknown policy: {next_policy}")
+                if proposed_policy not in self.policy_runners:
+                    raise KeyError(f"Comparator selected unknown policy: {proposed_policy}")
+
+                # Comparator episodes can use the comparator's proposed policy.
+                # Fixed-policy episodes ignore the proposal and keeps the playbook policy.
+                if episode_uses_comparator:
+                    next_policy = proposed_policy
+                else:
+                    next_policy = current_policy
 
                 inference_times.append((time.perf_counter_ns() - inference_start) // 1000)
 
@@ -281,7 +363,7 @@ class ComparatorPlayer:
                 step_info = self.comparator.last_step_info
 
                 switch_committed = False
-                can_switch = (history_is_full and history_is_policy_pure)
+                can_switch = (episode_uses_comparator and history_is_full and history_is_policy_pure)
 
                 # Store the can_switch flag in the step info
                 if step_info is not None:
@@ -304,17 +386,24 @@ class ComparatorPlayer:
                 elif next_policy != current_policy:
 
                     log.debug(
-                        "Comparator switch blocked by cooldown at episode=%d step=%d: %s -> %s",
+                        "Comparator switch blocked at episode=%d step=%d: %s -> %s "
+                        "(episode_uses_comparator=%s)",
                         episode_no + 1,
                         step,
                         current_policy,
                         next_policy,
+                        episode_uses_comparator,
                     )
 
                 # Record the comparator step information if it exists
                 if step_info is not None:
                     step_info.switch_committed = switch_committed
 
+                    # For fixed-policy episodes, record the next policy as the current policy
+                    if not episode_uses_comparator:
+                        step_info.next_policy = current_policy
+
+                    # Record the reward breakdown statistics
                     step_info.reward_distance = reward_distance
                     step_info.reward_roll = reward_roll
                     step_info.reward_current = reward_current

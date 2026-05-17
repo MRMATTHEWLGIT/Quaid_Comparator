@@ -33,8 +33,6 @@ from __future__ import annotations
 import argparse
 import logging
 import shutil
-import re
-import sys
 import yaml
 import time
 from pathlib import Path
@@ -48,18 +46,6 @@ DEFAULT_MAX_STEPS = 500
 def get_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run policy inference and comparator evaluation in a Quaid environment.",
-    )
-
-    parser.add_argument(
-        "--mode",
-        choices=["single", "comparator"],
-        default="single",
-        help="Run either one fixed policy or the comparator policy-switching system."
-    )
-
-    parser.add_argument(
-        "-m", "--model",
-        help="Path to the actor model for single-policy inference (.onnx / .dat)."
     )
 
     parser.add_argument(
@@ -94,8 +80,6 @@ def get_args(argv=None) -> argparse.Namespace:
             "comparator policy YAML configuration."
     )
 
-    parser.add_argument("-e", "--episodes", type=int, default=5)
-
     parser.add_argument("-s", "--max-steps", type=int, default=DEFAULT_MAX_STEPS)
 
     parser.add_argument(
@@ -113,7 +97,7 @@ def get_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument(
         "--output-root",
-        default="data/snapshots",
+        default="data",
         help="Parent directory for the per-run timestamped folder."
     )
 
@@ -148,80 +132,64 @@ def get_args(argv=None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
 
-    if args.mode == "single":
-
-        if args.model is None:
-            parser.error("--model is required when --mode single is used.")
-
-        if args.comparator_config is not None:
-            parser.error(
-                "--policy-config should only be used with --mode comparator."
-            )
-
-    elif args.mode == "comparator":
-
-        if args.comparator_config is None:
-            parser.error(
-                "--policy-config is required when --mode comparator is used."
-            )
-
-        if args.model is not None:
-            parser.error(
-                "--model should only be used with --mode single."
-            )
+    # Validate the comparator config
+    if args.comparator_config is None:
+        raise ValueError("--comparator-config is required.")
 
     return args
 
 
-def detect_model_info(model_path: str) -> tuple[str, str]:
+def make_playbook_acronym(comparator_config: dict) -> str:
     """
-    Infer the environment and policy names from an actor model filename.
+    Create a short acronym for the episode playbook.
 
     Example:
-        ''aug_act_net_QuaidSIM-Flat_RA-TD3_+337.452.onnx''
-
-    Returns:
-        ('QuaidSIM-Flat', 'Flat')
+        [flat, ramp, uneven, comparator, comparator]
+        -> FRUCC
     """
 
-    name = Path(model_path).name
-    match = re.search(r"act_net_(QuaidSIM-([^-_]+))_", name)
+    episode_playbook = comparator_config.get("episode_playbook", [])
 
-    if not match:
-        return "unknown", "unknown"
+    acronym_map = {
+        "flat": "F",
+        "ramp": "R",
+        "uneven": "U",
+        "comparator": "C",
+    }
 
-    env_name = match.group(1)
-    policy_name = match.group(2)
+    acronym_parts = []
 
-    return env_name, policy_name
+    for entry in episode_playbook:
+        entry = str(entry)
+
+        if entry in acronym_map:
+            acronym_parts.append(acronym_map[entry])
+
+        else:
+            # Fallback for unexpected policy names.
+            acronym_parts.append(entry[:1].upper())
+
+    if len(acronym_parts) == 0:
+        return "NO_PLAYBOOK"
+
+    return "".join(acronym_parts)
 
 
-def create_run_dir(args: argparse.Namespace, timestamp: str | None = None) -> Path:
+def create_run_dir(
+    args: argparse.Namespace,
+    comparator_config: dict,
+    timestamp: str | None = None,
+) -> Path:
     """
     Create and return the timestamped output directory for the current run.
+
+    Runs are saved directly one level under the configured output root:
+        data/<timestamp>_<playbook_acronym>/
     """
 
-    # Single-policy mode
-    if args.mode == "single":
+    playbook_acronym = make_playbook_acronym(comparator_config)
 
-        detected_env_name, detected_policy_name = detect_model_info(args.model)
-
-        # Override the environment and policy names if provided
-        env_name = args.env_name or detected_env_name
-        policy_name = args.policy_name or detected_policy_name
-
-    # Comparator mode
-    elif args.mode == "comparator":
-
-        # Override the environment and policy names if provided
-        env_name = args.env_name or "QuaidSIM"
-        policy_name = args.policy_name or "comparator"
-
-    else:
-        raise ValueError(f"Unsupported mode: {args.mode}")
-
-    # Create the run directory
-    run_dir = Path(args.output_root) / env_name / policy_name / timestamp
+    run_dir = Path(args.output_root) / f"{timestamp}_{playbook_acronym}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Run output: {run_dir}")
@@ -277,15 +245,19 @@ def main(argv=None) -> int:
     # Create the timestamp for the run
     timestamp = time.strftime("%Y-%m-%dT%H-%M-%S")
 
-    # Create the run directory
-    run_dir = create_run_dir(args, timestamp)
+    # Load the comparator configuration
+    with open(args.comparator_config, "r", encoding="utf-8") as file:
+        comparator_config = yaml.safe_load(file)
 
-    # Determine the comparator config path, if in comparator mode
-    comparator_config_path = None
-    if args.mode == "comparator":
-        comparator_config_path = args.comparator_config
-    else:
-        comparator_config_path = None
+    # Create the run directory
+    run_dir = create_run_dir(
+        args=args,
+        comparator_config=comparator_config,
+        timestamp=timestamp,
+    )
+
+    # The comparator config defines both policies and the episode playbook
+    comparator_config_path = Path(args.comparator_config)
 
     copy_run_configs(
         comparator_config_path=comparator_config_path,
@@ -315,43 +287,28 @@ def main(argv=None) -> int:
         env.settings.robot.max_steps = args.max_steps
 
 
-    comparator_config = None
+    # Create the comparator player
+    comparator_player = ComparatorPlayer(
+        env=env,
+        comparator_config=comparator_config,
+        output_dir=run_dir,
+        max_test_steps=args.max_steps,
+        test_step_delay_ms=args.step_delay_ms,
+        policy_rnn_layers=args.policy_rnn_layers,
+        policy_rnn_hidden_size=args.policy_rnn_hidden_size,
+        embedding_gru_layers=args.embedding_gru_layers,
+        embedding_gru_hidden_size=args.embedding_gru_hidden_size,
+    )
 
-    # Comparator mode
-    if args.mode == "comparator":
+    # Run the comparator player
+    try:
+        comparator_player.play()
+        comparator_player.stats.print_summary()
+    finally:
+        comparator_player.close()
+        env.close()
 
-        # Load the comparator configuration
-        with open(args.comparator_config, "r", encoding="utf-8") as file:
-            comparator_config = yaml.safe_load(file)
-
-        # Create the comparator player
-        comparator_player = ComparatorPlayer(
-            env=env,
-            comparator_config=comparator_config,
-            output_dir=run_dir,
-            test_episodes=args.episodes,
-            max_test_steps=args.max_steps,
-            test_step_delay_ms=args.step_delay_ms,
-            policy_rnn_layers=args.policy_rnn_layers,
-            policy_rnn_hidden_size=args.policy_rnn_hidden_size,
-            embedding_gru_layers=args.embedding_gru_layers,
-            embedding_gru_hidden_size=args.embedding_gru_hidden_size,
-        )
-
-        # Run the comparator player
-        try:
-            comparator_player.play()
-            comparator_player.stats.print_summary()
-        finally:
-            comparator_player.close()
-            env.close()
-
-
-    # Single policy mode
-    elif args.mode == "single":
-        pass
-
-    return 0
+        return 0
 
 
 if __name__ == "__main__":
