@@ -79,6 +79,10 @@ class CandidateVoteResult:
     selected_policy: str
     selected_policy_count: int
     selected_policy_fraction: float
+    second_policy: str | None
+    second_policy_count: int
+    second_policy_fraction: float
+    vote_margin: float
 
 
 class Comparator:
@@ -133,6 +137,8 @@ class Comparator:
         self.include_current_policy_candidates = bool(comparator_hyperparameters.get("include_current_policy_candidates", True))
         self.min_vote_candidates = int(comparator_hyperparameters.get("min_vote_candidates", 1))
         self.min_vote_fraction = float(comparator_hyperparameters.get("min_vote_fraction", 0.0))
+        self.min_vote_margin = float(comparator_hyperparameters.get("min_vote_margin", 0.0))
+        self.required_consecutive_policy_votes = int(comparator_hyperparameters.get("required_consecutive_policy_votes", 0))
 
         # Validate the comparator hyperparameters
         if self.k_signature <= 0:
@@ -159,6 +165,16 @@ class Comparator:
 
         if self.min_vote_fraction < 0.0 or self.min_vote_fraction > 1.0:
             raise ValueError("min_vote_fraction must be between 0.0 and 1.0.")
+
+        if self.min_vote_margin < 0.0:
+            raise ValueError("min_vote_margin must be greater than or equal to zero.")
+
+        if self.required_consecutive_policy_votes < 0:
+            raise ValueError("required_consecutive_policy_votes must be greater than or equal to zero.")
+
+        # Store the pending policy and its count
+        self.pending_policy: str | None = None
+        self.pending_policy_count = 0
 
         # Store the set of valid policy keys
         self.valid_policy_keys = set(valid_policy_keys or [])
@@ -710,6 +726,10 @@ class Comparator:
         """
         self.query_history.clear()
 
+        # Reset the pending policy and its count
+        self.pending_policy = None
+        self.pending_policy_count = 0
+
 
     def update_query_history(self, state: np.ndarray) -> None:
         """
@@ -894,6 +914,10 @@ class Comparator:
                 selected_policy=str(current_policy),
                 selected_policy_count=0,
                 selected_policy_fraction=0.0,
+                second_policy=None,
+                second_policy_count=0,
+                second_policy_fraction=0.0,
+                vote_margin=0.0,
             )
 
         # Get the policies of the candidate points
@@ -940,11 +964,42 @@ class Comparator:
                 key=tied_policy_reward_means.get,
             )
 
+        # Get the total number of candidate points
+        candidate_count = len(candidate_indices)
+
         # Get the number of candidate points for the selected policy
         selected_policy_count = int(policy_vote_counts[selected_policy])
 
         # Calculate the fraction of candidate points for the selected policy
-        selected_policy_fraction = float(selected_policy_count / len(candidate_indices))
+        selected_policy_fraction = float(selected_policy_count / candidate_count)
+
+        # Sort the vote counts so that the second-best competing policy can be found
+        sorted_votes = sorted(
+            policy_vote_counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        # Find the strongest competing policy that is not the selected policy.
+        # This is important when the selected policy was chosen by the current-policy
+        # tie-break rule.
+        competing_votes = [
+            (policy, count)
+            for policy, count in sorted_votes
+            if policy != selected_policy
+        ]
+
+        if len(competing_votes) > 0:
+            second_policy, second_policy_count = competing_votes[0]
+        else:
+            second_policy = None
+            second_policy_count = 0
+
+        # Calculate the fraction of candidate points for the second-best policy
+        second_policy_fraction = float(second_policy_count / candidate_count)
+
+        # Calculate how clearly the selected policy beats the second-best policy
+        vote_margin = selected_policy_fraction - second_policy_fraction
 
         # Create and return the candidate vote result
         return CandidateVoteResult(
@@ -953,6 +1008,10 @@ class Comparator:
             selected_policy=selected_policy,
             selected_policy_count=selected_policy_count,
             selected_policy_fraction=selected_policy_fraction,
+            second_policy=second_policy,
+            second_policy_count=second_policy_count,
+            second_policy_fraction=second_policy_fraction,
+            vote_margin=vote_margin,
         )
 
     def select_policy(
@@ -1013,7 +1072,9 @@ class Comparator:
 
         # Build the candidate mask based on query-vs-memory criteria
         candidate_mask_result = self.build_candidate_mask(query_stats)
-        self.last_step_info.candidate_filter_counts_json = json.dumps(candidate_mask_result.counts)
+        self.last_step_info.candidate_filter_counts_json = json.dumps(
+            candidate_mask_result.counts
+        )
 
         # Vote over all valid candidate points
         vote_result = self.vote_for_policy(
@@ -1021,15 +1082,16 @@ class Comparator:
             candidate_mask=candidate_mask_result.candidate_mask,
         )
 
+        # Store statistics to keep track of the comparator's candidate vote
         self.last_step_info.candidate_count = int(len(vote_result.candidate_indices))
-
-        # Not enough candidates to vote, so keep using the current policy
-        if len(vote_result.candidate_indices) < self.min_vote_candidates:
-            return current_policy
-
-        # Not enough candidate support for the selected policy, so keep using the current policy
-        if vote_result.selected_policy_fraction < self.min_vote_fraction:
-            return current_policy
+        self.last_step_info.candidate_indices_json = json.dumps(vote_result.candidate_indices.astype(int).tolist())
+        self.last_step_info.policy_vote_counts_json = json.dumps(vote_result.policy_vote_counts)
+        self.last_step_info.selected_policy_count = int(vote_result.selected_policy_count)
+        self.last_step_info.selected_policy_fraction = float(vote_result.selected_policy_fraction)
+        self.last_step_info.second_policy = vote_result.second_policy
+        self.last_step_info.second_policy_count = int(vote_result.second_policy_count)
+        self.last_step_info.second_policy_fraction = float(vote_result.second_policy_fraction)
+        self.last_step_info.vote_margin = float(vote_result.vote_margin)
 
         # No valid candidates exist, so keep using the current policy
         if len(vote_result.candidate_indices) == 0:
@@ -1042,21 +1104,106 @@ class Comparator:
 
             return current_policy
 
+        # Check whether the vote is confident enough to act on
+        vote_is_confident = (
+            len(vote_result.candidate_indices) >= self.min_vote_candidates
+            and vote_result.selected_policy_fraction >= self.min_vote_fraction
+            and vote_result.vote_margin >= self.min_vote_margin
+        )
+
+        # Not enough vote evidence exists, so keep using the current policy
+        if not vote_is_confident:
+            self.last_step_info.next_policy = str(current_policy)
+
+            # Reset any pending switch because the current vote is not reliable
+            self.pending_policy = None
+            self.pending_policy_count = 0
+
+            log.debug(
+                "Comparator step=%d current=%s blocked ambiguous vote: "
+                "candidates=%d selected=%s selected_fraction=%.3f margin=%.3f votes=%s",
+                step,
+                current_policy,
+                len(vote_result.candidate_indices),
+                vote_result.selected_policy,
+                vote_result.selected_policy_fraction,
+                vote_result.vote_margin,
+                vote_result.policy_vote_counts,
+            )
+
+            return current_policy
+
         # Get the selected policy from the vote result
         next_policy = str(vote_result.selected_policy)
 
+        # If the selected policy is already the current policy, no switch is needed
+        if next_policy == str(current_policy):
+
+            # Reset the pending policy because the comparator is choosing to stay
+            self.pending_policy = None
+            self.pending_policy_count = 0
+
+            # Store statistics to keep track of the comparator's decision
+            self.last_step_info.next_policy = str(current_policy)
+
+            log.debug(
+                "Comparator vote step=%d current=%s staying candidates=%d votes=%s "
+                "selected_count=%d selected_fraction=%.3f margin=%.3f counts=%s",
+                step,
+                current_policy,
+                len(vote_result.candidate_indices),
+                vote_result.policy_vote_counts,
+                vote_result.selected_policy_count,
+                vote_result.selected_policy_fraction,
+                vote_result.vote_margin,
+                candidate_mask_result.counts,
+            )
+
+            return current_policy
+
+        # Track whether the same non-current policy has won across consecutive
+        # comparator decisions. This prevents one noisy vote from causing a switch.
+        if self.pending_policy == next_policy:
+            self.pending_policy_count += 1
+
+        else:
+            self.pending_policy = next_policy
+            self.pending_policy_count = 1
+
+        # Do not switch until the selected policy has been confirmed for enough
+        # consecutive comparator decisions.
+        if self.pending_policy_count < self.required_consecutive_policy_votes:
+            self.last_step_info.next_policy = str(current_policy)
+
+            log.debug(
+                "Comparator step=%d current=%s pending switch to %s: "
+                "confirmation %d/%d candidates=%d votes=%s "
+                "selected_fraction=%.3f margin=%.3f",
+                step,
+                current_policy,
+                next_policy,
+                self.pending_policy_count,
+                self.required_consecutive_policy_votes,
+                len(vote_result.candidate_indices),
+                vote_result.policy_vote_counts,
+                vote_result.selected_policy_fraction,
+                vote_result.vote_margin,
+            )
+
+            return current_policy
+
+        # The selected policy has been confirmed enough times, so commit the
+        # comparator decision and reset the pending switch state.
+        self.pending_policy = None
+        self.pending_policy_count = 0
+
         # Store statistics to keep track of the comparator's decision
         self.last_step_info.next_policy = next_policy
-        self.last_step_info.candidate_count = int(len(vote_result.candidate_indices))
-        self.last_step_info.candidate_indices_json = json.dumps(vote_result.candidate_indices.astype(int).tolist())
-        self.last_step_info.policy_vote_counts_json = json.dumps(vote_result.policy_vote_counts)
-        self.last_step_info.selected_policy_count = int(vote_result.selected_policy_count)
-        self.last_step_info.selected_policy_fraction = float(vote_result.selected_policy_fraction)
 
         # Log the comparator's decision
         log.debug(
             "Comparator vote step=%d current=%s next=%s candidates=%d votes=%s "
-            "selected_count=%d selected_fraction=%.3f counts=%s",
+            "selected_count=%d selected_fraction=%.3f margin=%.3f counts=%s",
             step,
             current_policy,
             next_policy,
@@ -1064,6 +1211,7 @@ class Comparator:
             vote_result.policy_vote_counts,
             vote_result.selected_policy_count,
             vote_result.selected_policy_fraction,
+            vote_result.vote_margin,
             candidate_mask_result.counts,
         )
 

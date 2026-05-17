@@ -27,11 +27,13 @@ hyperparameters:
   k_reward: 40
 
   # Candidate filtering hyperparameters
-  min_reward_gain_percent: 10.0
+  min_reward_gain_percent: 5.0
   min_distribution_overlap: 0.80
-  min_pairwise_agreement: 0.80
+  min_pairwise_agreement: 1.00
   include_current_policy_candidates: true
 
   # Candidate voting hyperparameters
   min_vote_candidates: 10
   min_vote_fraction: 0.50
+  min_vote_margin: 0.10
+  required_consecutive_policy_votes: 3

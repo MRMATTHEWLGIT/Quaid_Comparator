@@ -78,6 +78,12 @@ class ComparatorStepInfo:
     selected_policy_fraction: Optional[float] = None
     candidate_filter_counts_json: Optional[str] = None
 
+    # Second policy statistics
+    second_policy: Optional[str] = None
+    second_policy_count: Optional[int] = None
+    second_policy_fraction: Optional[float] = None
+    vote_margin: Optional[float] = None
+
     # Reward statistics
     reward_distance: Optional[float] = None
     reward_roll: Optional[float] = None
@@ -128,6 +134,10 @@ class InferenceStats:
                 " policy_vote_counts_json TEXT,"
                 " selected_policy_count INTEGER,"
                 " selected_policy_fraction REAL,"
+                " second_policy TEXT,"
+                " second_policy_count INTEGER,"
+                " second_policy_fraction REAL,"
+                " vote_margin REAL,"
                 " query_local_reward_mean REAL,"
                 " query_umap_x REAL,"
                 " query_umap_y REAL,"
@@ -183,6 +193,10 @@ class InferenceStats:
             " policy_vote_counts_json,"
             " selected_policy_count,"
             " selected_policy_fraction,"
+            " second_policy,"
+            " second_policy_count,"
+            " second_policy_fraction,"
+            " vote_margin,"
             " query_local_reward_mean,"
             " query_umap_x,"
             " query_umap_y,"
@@ -191,7 +205,7 @@ class InferenceStats:
             " reward_current,"
             " step_reward_total,"
             " episode_reward_total"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
@@ -205,6 +219,10 @@ class InferenceStats:
                 step_info.policy_vote_counts_json,
                 step_info.selected_policy_count,
                 step_info.selected_policy_fraction,
+                step_info.second_policy,
+                step_info.second_policy_count,
+                step_info.second_policy_fraction,
+                step_info.vote_margin,
                 step_info.query_local_reward_mean,
                 step_info.query_umap_x,
                 step_info.query_umap_y,
