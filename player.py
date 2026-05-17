@@ -367,7 +367,14 @@ class ComparatorPlayer:
 
             # Pause between episodes so the robot can be reset physically
             if episode_no < self.test_episodes - 1:
-                self._pause_between_episodes()
+
+                # In the simulation, so the robot resets automatically
+                if self.env.settings.robot.sim:
+                    log.info("Skipping between-episode pause because simulation mode is active.")
+                
+                # In the real world, so the robot needs to be reset manually
+                else:
+                    self._pause_between_episodes()
 
             self._wait_if_paused()
 

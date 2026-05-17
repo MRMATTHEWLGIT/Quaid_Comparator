@@ -665,46 +665,6 @@ def plot_vote_counts_over_time(
     plt.close(fig)
 
 
-def minmax_scale_to_range(
-    values: np.ndarray,
-    *,
-    output_min: float = 0.0,
-    output_max: float = 100.0,
-) -> np.ndarray:
-    """
-    Min-max scale values into a fixed output range.
-
-    If all values are equal, return the midpoint of the output range.
-    """
-
-    values = np.asarray(values, dtype=float)
-
-    valid_mask = np.isfinite(values)
-
-    scaled = np.full_like(values, np.nan, dtype=float)
-
-    if not np.any(valid_mask):
-        return scaled
-
-    valid_values = values[valid_mask]
-
-    value_min = np.min(valid_values)
-    value_max = np.max(valid_values)
-
-    if np.isclose(value_min, value_max):
-        scaled[valid_mask] = (output_min + output_max) / 2.0
-        return scaled
-
-    scaled[valid_mask] = (
-        (valid_values - value_min)
-        / (value_max - value_min)
-        * (output_max - output_min)
-        + output_min
-    )
-
-    return scaled
-
-
 def add_policy_background_shading(
     ax,
     episode_df: pd.DataFrame,
@@ -786,90 +746,6 @@ def add_policy_background_shading(
     ]
 
     return legend_handles
-
-
-def plot_episode_step_reward_scaled(
-    steps_df: pd.DataFrame,
-    output_path: str | Path,
-    *,
-    rolling_window: int = 50,
-) -> None:
-    """
-    Plot raw and smoothed min-max scaled step reward for one episode.
-
-    The raw signal is shown transparently, while the rolling mean is shown
-    strongly. This makes local reward changes around switches easier to see.
-    """
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    required_columns = {"episode_no", "step", "step_reward_total"}
-
-    if not required_columns.issubset(steps_df.columns):
-        return
-
-    episode_df = steps_df.sort_values("step").copy()
-
-    episode_no = int(episode_df["episode_no"].iloc[0])
-
-    step_values = episode_df["step"].to_numpy()
-    step_reward = episode_df["step_reward_total"].to_numpy(dtype=float)
-
-    scaled_step_reward = minmax_scale_to_range(
-        step_reward,
-        output_min=0.0,
-        output_max=100.0,
-    )
-
-    episode_df["step_reward_scaled"] = scaled_step_reward
-
-    episode_df["step_reward_scaled_smooth"] = (
-        episode_df["step_reward_scaled"]
-        .rolling(window=rolling_window, min_periods=1, center=True)
-        .mean()
-    )
-
-    fig, ax = plt.subplots(figsize=(11, 5))
-
-    # Raw scaled reward, very transparent
-    ax.plot(
-        episode_df["step"],
-        episode_df["step_reward_scaled"],
-        linewidth=0.7,
-        alpha=0.15,
-        label="Step reward scaled 0-100",
-    )
-
-    # Smoothed scaled reward, main signal
-    ax.plot(
-        episode_df["step"],
-        episode_df["step_reward_scaled_smooth"],
-        linewidth=2.0,
-        alpha=0.95,
-        label=f"Rolling mean, window={rolling_window}",
-    )
-
-    if "switch_committed" in episode_df.columns:
-        switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
-
-        for _, row in switch_df.iterrows():
-            ax.axvline(
-                x=row["step"],
-                linewidth=1.0,
-                alpha=0.35,
-            )
-
-    ax.set_title(f"Comparator Smoothed Step Reward - Episode {episode_no}")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Min-max scaled step reward")
-    ax.set_ylim(-5.0, 105.0)
-    ax.grid(True, alpha=0.25)
-    ax.legend(loc="best", fontsize=9)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
 
 
 def plot_episode_reward_rate(
@@ -1047,6 +923,117 @@ def plot_episode_reward_components(
     plt.close(fig)
 
 
+def plot_switch_reward_delta(
+    steps_df: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    window: int = 50,
+) -> None:
+    """
+    Plot mean reward before and after each committed policy switch.
+    """
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    required_columns = {
+        "episode_no",
+        "step",
+        "step_reward_total",
+        "switch_committed",
+        "current_policy",
+        "next_policy",
+    }
+
+    if not required_columns.issubset(steps_df.columns):
+        return
+
+    episode_df = steps_df.sort_values("step").copy()
+    episode_no = int(episode_df["episode_no"].iloc[0])
+
+    switch_df = episode_df[episode_df["switch_committed"].astype(int) == 1]
+
+    if len(switch_df) == 0:
+        return
+
+    labels = []
+    before_means = []
+    after_means = []
+    deltas = []
+
+    for _, switch_row in switch_df.iterrows():
+
+        switch_step = int(switch_row["step"])
+
+        before_df = episode_df[
+            (episode_df["step"] >= switch_step - window)
+            & (episode_df["step"] < switch_step)
+        ]
+
+        after_df = episode_df[
+            (episode_df["step"] > switch_step)
+            & (episode_df["step"] <= switch_step + window)
+        ]
+
+        if len(before_df) == 0 or len(after_df) == 0:
+            continue
+
+        before_mean = float(before_df["step_reward_total"].mean())
+        after_mean = float(after_df["step_reward_total"].mean())
+
+        before_policy = str(before_df["current_policy"].iloc[-1])
+        after_policy = str(after_df["current_policy"].iloc[0])
+
+        labels.append(f"{switch_step}\n{before_policy}→{after_policy}")
+        before_means.append(before_mean)
+        after_means.append(after_mean)
+        deltas.append(after_mean - before_mean)
+
+    if len(labels) == 0:
+        return
+
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.bar(
+        x - width / 2,
+        before_means,
+        width,
+        label=f"Before switch, {window} steps",
+    )
+
+    ax.bar(
+        x + width / 2,
+        after_means,
+        width,
+        label=f"After switch, {window} steps",
+    )
+
+    for index, delta in enumerate(deltas):
+        ax.text(
+            x[index],
+            max(before_means[index], after_means[index]),
+            f"Δ={delta:+.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    ax.set_title(f"Switch Reward Change - Episode {episode_no}")
+    ax.set_xlabel("Switch step and policy transition")
+    ax.set_ylabel("Mean step reward")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 # -------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------
@@ -1096,19 +1083,25 @@ def main() -> int:
     steps_df.to_csv(csv_path, index=False)
 
     # Save per-episode plots
-    episode_plot_dir = output_dir / "episodes"
-    episode_plot_dir.mkdir(parents=True, exist_ok=True)
+    episode_root_dir = output_dir / "episodes"
+    episode_root_dir.mkdir(parents=True, exist_ok=True)
 
     saved_plot_paths = []
 
     for episode_no, episode_df in steps_df.groupby("episode_no"):
 
+        episode_no_int = int(episode_no)
+
+        # Create a separate folder for each episode
+        episode_plot_dir = episode_root_dir / f"episode_{episode_no_int:03d}"
+        episode_plot_dir.mkdir(parents=True, exist_ok=True)
+
         database_query_plot_path = (
-            episode_plot_dir / f"episode_{int(episode_no):03d}_umap_database_with_queries.png"
+            episode_plot_dir / "umap_database_with_queries.png"
         )
 
         query_trajectory_plot_path = (
-            episode_plot_dir / f"episode_{int(episode_no):03d}_query_umap_trajectory.png"
+            episode_plot_dir / "query_umap_trajectory.png"
         )
 
         plot_umap_database_and_queries(
@@ -1124,7 +1117,7 @@ def main() -> int:
         )
 
         vote_counts_plot_path = (
-            episode_plot_dir / f"episode_{int(episode_no):03d}_policy_vote_counts.png"
+            episode_plot_dir / "policy_vote_counts.png"
         )
 
         plot_vote_counts_over_time(
@@ -1132,21 +1125,21 @@ def main() -> int:
             output_path=vote_counts_plot_path,
         )
 
-        plot_episode_step_reward_scaled(
+        plot_switch_reward_delta(
             steps_df=episode_df,
-            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_step_reward_scaled_smooth.png",
-            rolling_window=50,
+            output_path=episode_plot_dir / "switch_reward_delta.png",
+            window=50,
         )
 
         plot_episode_reward_rate(
             steps_df=episode_df,
-            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_reward_rate.png",
+            output_path=episode_plot_dir / "reward_rate.png",
             rolling_window=50,
         )
 
         plot_episode_reward_components(
             steps_df=episode_df,
-            output_path=episode_plot_dir / f"episode_{int(episode_no):03d}_reward_components.png",
+            output_path=episode_plot_dir / "reward_components.png",
             rolling_window=50,
         )
 
