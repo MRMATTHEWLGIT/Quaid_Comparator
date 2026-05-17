@@ -30,20 +30,38 @@ robot:
   max_y: 1e6
   debug_mocap: 1
 
+
+# Settings used to match fixed theta/yaw runs of the robot
   adjust_theta_on_reset: 1
   # PI / 4
-  #  adjust_theta_interval: 0.785398163
+#  adjust_theta_interval: 0.785398163
   # PI / 8
   adjust_theta_interval: 0.392699081
-  #  adjust_theta_interval: 0.3
   # uniform, normal or zero
-  adjust_theta_distribution: uniform
-  adjust_theta_alternate_distribution: uniform
-  # every x steps
+  adjust_theta_distribution: zero
+  adjust_theta_alternate_distribution: zero
+  # every x frames
   adjust_theta_alternate_with_forward_every: 100
-  reset_theta_min_steps: 50
-  reset_theta_max_steps: 300
+  reset_theta_min_steps: 0
+  reset_theta_max_steps: 0
   mean_yaw_steps: 10000
+
+
+# Settings used to command mid-episode theta adjustments
+  # adjust_theta_on_reset: 1
+  # # PI / 4
+  # #  adjust_theta_interval: 0.785398163
+  # # PI / 8
+  # adjust_theta_interval: 0.392699081
+  # #  adjust_theta_interval: 0.3
+  # # uniform, normal or zero
+  # adjust_theta_distribution: uniform
+  # adjust_theta_alternate_distribution: uniform
+  # # every x steps
+  # adjust_theta_alternate_with_forward_every: 100
+  # reset_theta_min_steps: 50
+  # reset_theta_max_steps: 300
+  # mean_yaw_steps: 10000
 
   # PI / 3 - end episode when yaw reaches +/- this value
   #  yaw_end_episode: 1.0471975512

@@ -162,16 +162,11 @@ class ComparatorPlayer:
             # Start from the configured initial policy
             current_policy = self.initial_policy
 
-            # Track when the last accepted policy switch occurred
-            last_switch_step = -10_000
-
-            episode_reward = 0.0
             episode_start = time.perf_counter()
             inference_times: list[int] = []
 
             # Track episode reward breakdown
             reward_env = 0.0
-            episode_reward = 0.0
             episode_performance_reward = 0.0
 
             self._wait_if_paused()
@@ -217,17 +212,26 @@ class ComparatorPlayer:
                     reward_distance = float(reward_breakdown.distance)
                     reward_roll = float(reward_breakdown.roll)
                     reward_current = float(reward_breakdown.current)
+                    reward_yaw = float(reward_breakdown.yaw)
+                    reward_pitch = float(reward_breakdown.pitch)
+                    reward_action_smoothness = float(reward_breakdown.action_smoothness)
 
                     step_performance_reward = (
                         reward_distance
                         + reward_roll
                         + reward_current
+                        + reward_yaw
+                        + reward_pitch
+                        + reward_action_smoothness
                     )
 
                 else:
                     reward_distance = None
                     reward_roll = None
                     reward_current = None
+                    reward_yaw = None
+                    reward_pitch = None
+                    reward_action_smoothness = None
 
                     # Fallback only. Normally reward_breakdown should exist
                     step_performance_reward = float(reward)
@@ -249,19 +253,6 @@ class ComparatorPlayer:
                     ],
                     axis=0,
                 )
-
-                # feature_names = [
-                #     "current_front_left", "current_front_right", "current_back_left",
-                #     "current", "yaw", "acc_z", "pitch", "roll", "current_back_right",
-                #     "servo0", "servo1", "servo2", "servo3",
-                #     "servo4", "servo5", "servo6", "servo7",
-                #     "action0", "action1", "action2", "action3",
-                #     "action4", "action5", "action6", "action7",
-                # ]
-
-                # print("\nLIVE COMPARATOR STATE")
-                # for name, value in zip(feature_names, comparator_state):
-                #     print(f"{name:>20}: {value: .6f}")
 
                 self.comparator.update_query_history(comparator_state)
 
@@ -300,7 +291,6 @@ class ComparatorPlayer:
 
                     previous_policy = current_policy
                     current_policy = next_policy
-                    last_switch_step = step
                     switch_committed = True
 
                     log.info(
@@ -328,6 +318,9 @@ class ComparatorPlayer:
                     step_info.reward_distance = reward_distance
                     step_info.reward_roll = reward_roll
                     step_info.reward_current = reward_current
+                    step_info.reward_yaw = reward_yaw
+                    step_info.reward_pitch = reward_pitch
+                    step_info.reward_action_smoothness = reward_action_smoothness
                     step_info.step_reward_total = float(step_performance_reward)
                     step_info.episode_reward_total = float(episode_performance_reward)
 

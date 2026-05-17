@@ -88,6 +88,9 @@ class ComparatorStepInfo:
     reward_distance: Optional[float] = None
     reward_roll: Optional[float] = None
     reward_current: Optional[float] = None
+    reward_yaw: Optional[float] = None
+    reward_pitch: Optional[float] = None
+    reward_action_smoothness: Optional[float] = None
     step_reward_total: Optional[float] = None
     episode_reward_total: Optional[float] = None
 
@@ -138,6 +141,9 @@ class InferenceStats:
                 " second_policy_count INTEGER,"
                 " second_policy_fraction REAL,"
                 " vote_margin REAL,"
+                " reward_yaw REAL,"
+                " reward_pitch REAL,"
+                " reward_action_smoothness REAL,"
                 " query_local_reward_mean REAL,"
                 " query_umap_x REAL,"
                 " query_umap_y REAL,"
@@ -197,6 +203,9 @@ class InferenceStats:
             " second_policy_count,"
             " second_policy_fraction,"
             " vote_margin,"
+            " reward_yaw,"
+            " reward_pitch,"
+            " reward_action_smoothness,"
             " query_local_reward_mean,"
             " query_umap_x,"
             " query_umap_y,"
@@ -205,7 +214,7 @@ class InferenceStats:
             " reward_current,"
             " step_reward_total,"
             " episode_reward_total"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
@@ -223,6 +232,9 @@ class InferenceStats:
                 step_info.second_policy_count,
                 step_info.second_policy_fraction,
                 step_info.vote_margin,
+                step_info.reward_yaw,
+                step_info.reward_pitch,
+                step_info.reward_action_smoothness,
                 step_info.query_local_reward_mean,
                 step_info.query_umap_x,
                 step_info.query_umap_y,

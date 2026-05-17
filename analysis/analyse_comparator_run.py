@@ -969,6 +969,9 @@ def plot_episode_reward_components(
         "reward_distance",
         "reward_roll",
         "reward_current",
+        "reward_yaw",
+        "reward_pitch",
+        "reward_action_smoothness",
     }
 
     if not required_columns.issubset(steps_df.columns):
@@ -982,6 +985,9 @@ def plot_episode_reward_components(
         "reward_distance",
         "reward_roll",
         "reward_current",
+        "reward_yaw",
+        "reward_pitch",
+        "reward_action_smoothness",
     ]
 
     fig, ax = plt.subplots(figsize=(11, 5))

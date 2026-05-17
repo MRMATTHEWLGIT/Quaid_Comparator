@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -529,6 +530,489 @@ def extract_embeddings(model: RNN_GRU, stats: tuple, testset_path: Path, device:
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------------
+
+def safe_filename(text: str) -> str:
+    """Convert arbitrary text into a safe filename component."""
+
+    return (
+        str(text)
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace(" ", "_")
+    )
+
+
+def get_plot_labels(extracted: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build terrain, policy, and condition labels for every extracted embedding.
+    """
+
+    idx_to_terrain = {
+        int(index): str(terrain)
+        for index, terrain in extracted["idx_to_terrain"].items()
+    }
+
+    terrain_names = np.array(
+        [idx_to_terrain[int(terrain_id)] for terrain_id in extracted["terrains"]],
+        dtype=object,
+    )
+
+    policy_keys = np.array(
+        [policy_key_from_terrain_name(terrain_name) for terrain_name in terrain_names],
+        dtype=object,
+    )
+
+    condition_names = np.array(
+        [condition_name_from_terrain_name(terrain_name) for terrain_name in terrain_names],
+        dtype=object,
+    )
+
+    return terrain_names, policy_keys, condition_names
+
+
+def scatter_umap_by_label(
+    ax,
+    umap_embeddings: np.ndarray,
+    labels: np.ndarray,
+    *,
+    title: str,
+    point_size: float = 8.0,
+    alpha: float = 0.55,
+) -> None:
+    """Draw a labelled UMAP scatter plot on an existing axis."""
+
+    unique_labels = sorted(np.unique(labels.astype(str)))
+    colour_map = plt.get_cmap("tab10")
+
+    for label_index, label in enumerate(unique_labels):
+        label_mask = labels.astype(str) == label
+
+        ax.scatter(
+            umap_embeddings[label_mask, 0],
+            umap_embeddings[label_mask, 1],
+            s=point_size,
+            alpha=alpha,
+            color=colour_map(label_index % 10),
+            label=str(label),
+            linewidths=0,
+        )
+
+    ax.set_title(title)
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8, markerscale=2.0)
+
+
+def plot_overall_umap_by_policy_and_condition(
+    plot_dir: Path,
+    umap_embeddings: np.ndarray,
+    policy_keys: np.ndarray,
+    condition_names: np.ndarray,
+) -> Path:
+    """
+    Plot the full comparator UMAP space labelled by policy and condition.
+
+    The left subplot colours points by policy. The right subplot colours the
+    same points by terrain condition so the two views are easy to compare.
+    """
+
+    plot_path = plot_dir / "umap_overall_policy_vs_condition.png"
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=True, sharey=True)
+
+    scatter_umap_by_label(
+        axes[0],
+        umap_embeddings,
+        policy_keys,
+        title="All embeddings labelled by policy",
+    )
+
+    scatter_umap_by_label(
+        axes[1],
+        umap_embeddings,
+        condition_names,
+        title="All embeddings labelled by condition",
+    )
+
+    fig.suptitle("Comparator UMAP Space", fontsize=15, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return plot_path
+
+
+def plot_policy_umap_by_condition(
+    plot_dir: Path,
+    umap_embeddings: np.ndarray,
+    policy_keys: np.ndarray,
+    condition_names: np.ndarray,
+) -> list[Path]:
+    """
+    Create one UMAP plot per policy, with points labelled by condition.
+    """
+
+    save_paths = []
+
+    for policy in sorted(np.unique(policy_keys.astype(str))):
+        policy_mask = policy_keys.astype(str) == policy
+
+        if not np.any(policy_mask):
+            continue
+
+        fig, ax = plt.subplots(figsize=(8, 7))
+
+        scatter_umap_by_label(
+            ax,
+            umap_embeddings[policy_mask],
+            condition_names[policy_mask],
+            title=f"Policy island: {policy} labelled by condition",
+            point_size=10.0,
+            alpha=0.65,
+        )
+
+        fig.tight_layout()
+
+        plot_path = plot_dir / f"umap_policy_{safe_filename(policy)}_by_condition.png"
+        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        save_paths.append(plot_path)
+
+    return save_paths
+
+
+def clip_reward_values(
+    rewards: np.ndarray,
+    clip_percentile_range: tuple[float, float] | None,
+) -> np.ndarray:
+    """Optionally percentile-clip reward values for clearer violin plots."""
+
+    rewards = rewards[np.isfinite(rewards)]
+
+    if clip_percentile_range is None or len(rewards) == 0:
+        return rewards
+
+    low_percentile, high_percentile = clip_percentile_range
+    low_value, high_value = np.percentile(rewards, [low_percentile, high_percentile])
+
+    return rewards[(rewards >= low_value) & (rewards <= high_value)]
+
+
+def plot_reward_violin_by_policy(
+    plot_dir: Path,
+    rewards: np.ndarray,
+    policy_keys: np.ndarray,
+    *,
+    clip_percentile_range: tuple[float, float] | None = (1.0, 99.0),
+) -> Path:
+    """
+    Create a simple reward violin plot grouped by policy.
+    """
+
+    plot_path = plot_dir / "reward_violin_by_policy.png"
+
+    rewards = np.asarray(rewards, dtype=np.float64)
+    policy_keys = policy_keys.astype(str)
+
+    policy_labels = []
+    policy_reward_data = []
+
+    for policy in sorted(np.unique(policy_keys)):
+        policy_mask = policy_keys == policy
+        policy_rewards = clip_reward_values(
+            rewards[policy_mask],
+            clip_percentile_range=clip_percentile_range,
+        )
+
+        if len(policy_rewards) == 0:
+            continue
+
+        policy_labels.append(policy)
+        policy_reward_data.append(policy_rewards)
+
+    if len(policy_reward_data) == 0:
+        raise ValueError("No valid reward values were available for the violin plot.")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    violin = ax.violinplot(
+        policy_reward_data,
+        showmeans=False,
+        showmedians=False,
+        showextrema=False,
+    )
+
+    colour_map = plt.get_cmap("tab10")
+
+    for index, body in enumerate(violin["bodies"]):
+        body.set_facecolor(colour_map(index % 10))
+        body.set_edgecolor("black")
+        body.set_alpha(0.8)
+
+    positions = np.arange(1, len(policy_reward_data) + 1)
+
+    q1_values = [np.percentile(values, 25) for values in policy_reward_data]
+    median_values = [np.percentile(values, 50) for values in policy_reward_data]
+    q3_values = [np.percentile(values, 75) for values in policy_reward_data]
+    p5_values = [np.percentile(values, 5) for values in policy_reward_data]
+    p95_values = [np.percentile(values, 95) for values in policy_reward_data]
+
+    ax.vlines(positions, p5_values, p95_values, color="black", linewidth=1.2, alpha=0.7)
+    ax.vlines(positions, q1_values, q3_values, color="black", linewidth=5.0, label="Q1 to Q3")
+
+    ax.scatter(
+        positions,
+        median_values,
+        color="white",
+        edgecolor="black",
+        zorder=3,
+        label="Median",
+    )
+
+    y_min, y_max = ax.get_ylim()
+    y_offset = (y_max - y_min) * 0.03
+
+    for index, values in enumerate(policy_reward_data):
+        ax.text(
+            index + 1,
+            min(np.max(values) + y_offset, y_max - y_offset),
+            f"n={len(values)}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    title = "Reward distribution by policy"
+
+    if clip_percentile_range is not None:
+        title += f" ({clip_percentile_range[0]:.0f}-{clip_percentile_range[1]:.0f} percentile clipped)"
+
+    ax.set_title(title)
+    ax.set_xlabel("Policy")
+    ax.set_ylabel("Reward")
+    ax.set_xticks(positions)
+    ax.set_xticklabels(policy_labels, rotation=25, ha="right")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(loc="best", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return plot_path
+
+
+def plot_reward_violin_by_policy_per_condition(
+    plot_dir: Path,
+    rewards: np.ndarray,
+    policy_keys: np.ndarray,
+    condition_keys: np.ndarray,
+    *,
+    clip_percentile_range: tuple[float, float] | None = (1.0, 99.0),
+) -> list[Path]:
+    """
+    Create one reward violin plot per condition, grouped by policy.
+
+    This makes it easier to compare which policy performs best within each
+    condition.
+    """
+
+    condition_plot_dir = plot_dir / "reward_violin_by_condition"
+    condition_plot_dir.mkdir(parents=True, exist_ok=True)
+
+    rewards = np.asarray(rewards, dtype=np.float64)
+    policy_keys = policy_keys.astype(str)
+    condition_keys = condition_keys.astype(str)
+
+    plot_paths = []
+
+    for condition in sorted(np.unique(condition_keys)):
+
+        condition_mask = condition_keys == condition
+
+        condition_rewards = rewards[condition_mask]
+        condition_policy_keys = policy_keys[condition_mask]
+
+        policy_labels = []
+        policy_reward_data = []
+
+        for policy in sorted(np.unique(condition_policy_keys)):
+            policy_mask = condition_policy_keys == policy
+
+            policy_rewards = clip_reward_values(
+                condition_rewards[policy_mask],
+                clip_percentile_range=clip_percentile_range,
+            )
+
+            if len(policy_rewards) == 0:
+                continue
+
+            policy_labels.append(policy)
+            policy_reward_data.append(policy_rewards)
+
+        if len(policy_reward_data) == 0:
+            continue
+
+        safe_condition_name = str(condition).replace(" ", "_").replace("/", "_")
+
+        plot_path = (
+            condition_plot_dir
+            / f"reward_violin_condition_{safe_condition_name}.png"
+        )
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        violin = ax.violinplot(
+            policy_reward_data,
+            showmeans=False,
+            showmedians=False,
+            showextrema=False,
+        )
+
+        colour_map = plt.get_cmap("tab10")
+
+        for index, body in enumerate(violin["bodies"]):
+            body.set_facecolor(colour_map(index % 10))
+            body.set_edgecolor("black")
+            body.set_alpha(0.8)
+
+        positions = np.arange(1, len(policy_reward_data) + 1)
+
+        q1_values = [np.percentile(values, 25) for values in policy_reward_data]
+        median_values = [np.percentile(values, 50) for values in policy_reward_data]
+        q3_values = [np.percentile(values, 75) for values in policy_reward_data]
+        p5_values = [np.percentile(values, 5) for values in policy_reward_data]
+        p95_values = [np.percentile(values, 95) for values in policy_reward_data]
+
+        ax.vlines(
+            positions,
+            p5_values,
+            p95_values,
+            color="black",
+            linewidth=1.2,
+            alpha=0.7,
+        )
+
+        ax.vlines(
+            positions,
+            q1_values,
+            q3_values,
+            color="black",
+            linewidth=5.0,
+            label="Q1 to Q3",
+        )
+
+        ax.scatter(
+            positions,
+            median_values,
+            color="white",
+            edgecolor="black",
+            zorder=3,
+            label="Median",
+        )
+
+        y_min, y_max = ax.get_ylim()
+        y_offset = (y_max - y_min) * 0.03
+
+        for index, values in enumerate(policy_reward_data):
+            ax.text(
+                index + 1,
+                min(np.max(values) + y_offset, y_max - y_offset),
+                f"n={len(values)}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+            )
+
+        title = f"Reward distribution by policy for condition: {condition}"
+
+        if clip_percentile_range is not None:
+            title += (
+                f" ({clip_percentile_range[0]:.0f}-"
+                f"{clip_percentile_range[1]:.0f} percentile clipped)"
+            )
+
+        ax.set_title(title)
+        ax.set_xlabel("Policy")
+        ax.set_ylabel("Reward")
+        ax.set_xticks(positions)
+        ax.set_xticklabels(policy_labels, rotation=25, ha="right")
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(loc="best", fontsize=9)
+
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        plot_paths.append(plot_path)
+
+    return plot_paths
+
+
+def save_build_plots(
+    save_dir: Path,
+    extracted: dict,
+    umap_embeddings: np.ndarray,
+) -> list[Path]:
+    """
+    Generate useful plots for inspecting the built comparator database.
+    """
+
+    plot_dir = save_dir / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    _, policy_keys, condition_names = get_plot_labels(extracted)
+
+    saved_paths = []
+
+    saved_paths.append(
+        plot_overall_umap_by_policy_and_condition(
+            plot_dir=plot_dir,
+            umap_embeddings=umap_embeddings,
+            policy_keys=policy_keys,
+            condition_names=condition_names,
+        )
+    )
+
+    saved_paths.extend(
+        plot_policy_umap_by_condition(
+            plot_dir=plot_dir,
+            umap_embeddings=umap_embeddings,
+            policy_keys=policy_keys,
+            condition_names=condition_names,
+        )
+    )
+
+    saved_paths.append(
+        plot_reward_violin_by_policy(
+            plot_dir=plot_dir,
+            rewards=extracted["rewards"],
+            policy_keys=policy_keys,
+            clip_percentile_range=(1.0, 99.0),
+        )
+    )
+
+    saved_paths.extend(
+        plot_reward_violin_by_policy_per_condition(
+            plot_dir=plot_dir,
+            rewards=extracted["rewards"],
+            policy_keys=policy_keys,
+            condition_keys=condition_names,
+            clip_percentile_range=(1.0, 99.0),
+        )
+    )
+
+    return saved_paths
+
 # ---------------------------------------------------------------------------
 # Save directory
 # ---------------------------------------------------------------------------
@@ -769,6 +1253,13 @@ def main(argv=None) -> int:
                                              extracted=extracted,
                                              umap_embeddings=umap_embeddings.astype(np.float32))
 
+    # Generate build-time plots for inspecting the comparator database
+    plot_paths = save_build_plots(
+        save_dir=save_dir,
+        extracted=extracted,
+        umap_embeddings=umap_embeddings.astype(np.float32),
+    )
+
     # Create and log all metadata
     metadata = {
         "umap_kind": args.umap_kind,
@@ -789,6 +1280,7 @@ def main(argv=None) -> int:
         "embedding_gru_onnx_path": gru_onnx_path.as_posix(),
         "embedding_gru_stats_path": stats_path.as_posix(),
         "umap_path": umap_path.as_posix(),
+        "plot_paths": [path.as_posix() for path in plot_paths],
     }
 
     # Save the metadata to a JSON file
@@ -808,6 +1300,7 @@ def main(argv=None) -> int:
     print(f"Embedding GRU stats: {stats_path}")
     print(f"UMAP asset: {umap_path}")
     print(f"Metadata: {save_dir / 'metadata.json'}")
+    print(f"Plots: {save_dir / 'plots'}")
     print(f"YAML snippet: {config_path}")
 
     return 0
