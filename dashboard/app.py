@@ -30,9 +30,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live comparator dashboard")
 
     parser.add_argument(
-        "--comparator-database",
-        required=True,
-        help="Path to comparator_database.npz containing historical UMAP embeddings.",
+        "--comparator-path",
+        default=None,
+        help="Path to the comparator asset folder containing comparator_database.npz, "
+            "metadata.json, embedding_gru_encoder.onnx, and parametric_umap_encoder.onnx.",
     )
 
     parser.add_argument(
@@ -49,15 +50,17 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--mqtt-topic",
-        default=DEFAULT_TOPIC,
-        help="MQTT topic to subscribe to for comparator telemetry.",
+        "--mqtt-queue",
+        type=int,
+        required=True,
+        help="MQTT queue number. The dashboard subscribes to "
+            "quaid/comparator/r<mqtt-queue>/telemetry.",
     )
 
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=800,
+        default=1000,
         help="Maximum live steps to retain for the current episode.",
     )
 
@@ -76,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     args, _ = parser.parse_known_args(sys.argv[1:])
+
     return args
 
 
@@ -100,11 +104,8 @@ def get_live_state(
 
 
 @st.cache_data(show_spinner=True)
-def load_comparator_database(database_path_string: str) -> dict[str, Any]:
-    database_path = Path(database_path_string)
-
-    if not database_path.exists():
-        raise FileNotFoundError(f"Comparator database does not exist: {database_path}")
+def load_comparator_database(comparator_path_string: str) -> dict[str, Any]:
+    comparator_path, database_path = resolve_comparator_database_path(comparator_path_string)
 
     npz = np.load(database_path, allow_pickle=True)
     database = {key: npz[key] for key in npz.files}
@@ -116,11 +117,52 @@ def load_comparator_database(database_path_string: str) -> dict[str, Any]:
     condition_names = derive_condition_names(database, database_path, n_points)
 
     return {
+        "comparator_path": str(comparator_path),
         "path": str(database_path),
         "umap_embeddings": umap_embeddings,
         "policy_keys": policy_keys,
         "condition_names": condition_names,
     }
+
+
+def resolve_comparator_database_path(comparator_path_string: str) -> tuple[Path, Path]:
+    """
+    Resolve a comparator asset folder into its comparator_database.npz path.
+
+    Expected folder structure:
+
+        comparator_path/
+        ├── comparator_database.npz
+        ├── metadata.json
+        ├── embedding_gru_encoder.onnx
+        ├── parametric_umap_encoder.onnx
+        └── ...
+
+    The input must be the comparator asset folder, not the database file itself.
+    """
+
+    comparator_path = Path(comparator_path_string)
+
+    if not comparator_path.exists():
+        raise FileNotFoundError(
+            f"Comparator path does not exist: {comparator_path}"
+        )
+
+    if not comparator_path.is_dir():
+        raise NotADirectoryError(
+            "Expected --comparator-path to point to a comparator asset folder, "
+            f"but got a file: {comparator_path}"
+        )
+
+    database_path = comparator_path / "comparator_database.npz"
+
+    if not database_path.exists():
+        raise FileNotFoundError(
+            "Could not find comparator_database.npz inside comparator path: "
+            f"{comparator_path}"
+        )
+
+    return comparator_path, database_path
 
 
 # ---------------------------------------------------------------------------
@@ -525,15 +567,17 @@ def main() -> None:
 
     st.title("Live Comparator Dashboard")
 
+    mqtt_topic = f"quaid/comparator/r{args.mqtt_queue}/telemetry"
+
     with st.sidebar:
         st.header("Inputs")
-        st.write(f"**Database**: `{args.comparator_database}`")
+        st.write(f"**Comparator path**: `{args.comparator_path}`")
         st.write(f"**MQTT**: `{args.mqtt_host}:{args.mqtt_port}`")
-        st.write(f"**Topic**: `{args.mqtt_topic}`")
+        st.write(f"**Topic**: `{mqtt_topic}`")
         st.write(f"**Rolling window**: `{args.rolling_window}`")
 
     try:
-        database = load_comparator_database(args.comparator_database)
+        database = load_comparator_database(args.comparator_path)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -542,7 +586,7 @@ def main() -> None:
         live_state = get_live_state(
             mqtt_host=args.mqtt_host,
             mqtt_port=args.mqtt_port,
-            mqtt_topic=args.mqtt_topic,
+            mqtt_topic=mqtt_topic,
             max_steps=args.max_steps,
         )
     except Exception as exc:

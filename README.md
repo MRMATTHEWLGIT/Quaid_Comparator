@@ -1,6 +1,6 @@
 # Quaid_Comparator
 
-# Building Comparator Assets
+## 1.0 Building Comparator Assets
 
 The comparator system requires a precomputed database of historical rollout embeddings.
 
@@ -13,7 +13,7 @@ The `build_comparator.py` script:
 
 ---
 
-## Testset Location
+### Testset Location
 
 Historical rollout testsets should be placed inside:
 
@@ -30,9 +30,9 @@ testsets/
 
 ---
 
-## Example Usage
+### Example Usage
 
-### Standard UMAP
+#### Standard UMAP
 
 ```bash
 python build_comparator.py \
@@ -41,7 +41,7 @@ python build_comparator.py \
     --umap-kind standard
 ```
 
-### Parametric UMAP
+#### Parametric UMAP
 
 ```bash
 python build_comparator.py \
@@ -54,7 +54,7 @@ python build_comparator.py \
 
 ---
 
-## Output Directory
+### Output Directory
 
 Generated comparator assets are saved into:
 
@@ -76,9 +76,9 @@ models/comparator/comparator_parametric_2026-05-12T17-24-30/
 
 ---
 
-## Generated Assets
+### Generated Assets
 
-### Standard UMAP
+#### Standard UMAP
 
 ```text
 comparator_database.npz
@@ -89,7 +89,7 @@ metadata.json
 comparator_assets.yaml
 ```
 
-### Parametric UMAP
+#### Parametric UMAP
 
 ```text
 comparator_database.npz
@@ -102,7 +102,7 @@ comparator_assets.yaml
 
 ---
 
-## Command Line Arguments
+### Command Line Arguments
 
 | Argument | Description | Default |
 |---|---|---|
@@ -119,10 +119,68 @@ comparator_assets.yaml
 
 ---
 
-## Runtime Usage
+### Runtime Usage
 
 The generated assets can then be referenced from `comparator.yaml`
 during comparator inference.
+
+
+## 2.0 Live Dashboard
+
+The comparator dashboard provides a live Streamlit view of the current comparator episode using MQTT telemetry. It overlays the live query embeddings onto the saved comparator UMAP database and displays episode-level reward and switching behaviour.
+
+Before launching the dashboard, make sure the MQTT broker is running and that the comparator assets have already been built with `build_comparator.py`.
+
+#### Launch Dashboard
+
+```bash
+python -m dashboard \
+    --comparator-path models\comparator\comparator_parametric_2026-05-17T22-30-15\ \
+    --mqtt-host localhost \
+    --mqtt-port 1883 \
+    --mqtt-queue 100 \
+    --refresh-ms 1000
+```
+
+The `--comparator-path` argument should point to the comparator asset folder containing:
+
+```text
+comparator_database.npz
+metadata.json
+embedding_gru_encoder.onnx
+parametric_umap_encoder.onnx
+```
+
+The `--mqtt-queue` argument is used to subscribe to the corresponding comparator telemetry topic:
+
+```text
+quaid/comparator/r100/telemetry
+```
+
+#### Run Comparator with Dashboard Telemetry
+
+In a separate terminal, run the comparator with the same MQTT queue:
+
+```bash
+python main.py \
+    --env-config config/quaid_sim.yaml \
+    --comparator-config config/comparator.yaml \
+    --mqtt-queue 100 \
+    --dashboard-mqtt
+```
+
+The dashboard can be launched before the comparator program. It will wait for MQTT telemetry and reset its plots at the start of each new episode.
+
+#### Useful Options
+
+| Argument | Description |
+|---|---|
+| `--comparator-path` | Path to the comparator asset folder |
+| `--mqtt-host` | MQTT broker host, usually `localhost` |
+| `--mqtt-port` | MQTT broker port, usually `1883` |
+| `--mqtt-queue` | Queue number used to form `quaid/comparator/r<queue>/telemetry` |
+| `--refresh-ms` | Dashboard redraw interval in milliseconds |
+
 
 ## Third-Party Code and Acknowledgements
 

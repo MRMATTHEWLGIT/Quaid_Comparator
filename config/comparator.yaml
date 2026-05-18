@@ -34,7 +34,7 @@ hyperparameters:
 
   # Candidate filtering hyperparameters
   min_reward_gain_percent: 5.0
-  min_distribution_overlap: 0.80
+  min_distribution_overlap: 0.75
   min_pairwise_agreement: 1.00
   include_current_policy_candidates: true
 
