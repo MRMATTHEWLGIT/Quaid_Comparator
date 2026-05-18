@@ -1,0 +1,314 @@
+--- a/mqtt_controller.py
++++ b/mqtt_controller.py
+@@ -16,6 +16,7 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ import logging
+ import time
+ from typing import Iterable, Optional, Sequence
+@@ -174,6 +175,23 @@
+     def _send(self, topic: str, payload: bytes) -> None:
+         self._client.publish(topic, payload, qos=1)
+ 
++    def publish_json(
++        self,
++        topic: str,
++        payload: dict,
++        *,
++        qos: int = 0,
++        retain: bool = False,
++    ) -> None:
++        """Publish UTF-8 JSON to an arbitrary MQTT topic.
++
++        This is used by the comparator dashboard so the policy runtime can
++        publish telemetry without creating a second MQTT connection.
++        """
++
++        encoded_payload = json.dumps(payload).encode('utf-8')
++        self._client.publish(topic, encoded_payload, qos=qos, retain=retain)
++
+     def act(self, action: Sequence[float]) -> None:
+         """Publish an 8-dim policy action.
+ 
+
+--- a/main.py
++++ b/main.py
+@@ -73,6 +73,19 @@
+     )
+ 
+     parser.add_argument(
++        "--dashboard-mqtt",
++        action="store_true",
++        help="Publish live comparator timestep telemetry for the Streamlit dashboard."
++    )
++
++    parser.add_argument(
++        "--dashboard-mqtt-topic",
++        default=None,
++        help="MQTT topic for dashboard telemetry. Defaults to "
++             "quaid/comparator/r<queue>/telemetry."
++    )
++
++    parser.add_argument(
+         "-g", "--gru-path",
+         default=None,
+         help="Optional global GRU override path. "
+@@ -273,6 +286,15 @@
+         # Override the MQTT queue specified in the environment YAML config.
+         # Stored as a string to match the QuaidEnv configuration format.
+         env_settings.ports.mqtt_queue_no = str(args.mqtt_queue)
++
++    dashboard_mqtt_topic = args.dashboard_mqtt_topic
++
++    if dashboard_mqtt_topic is None:
++        mqtt_queue_no = env_settings.ports.mqtt_queue_no
++        dashboard_mqtt_topic = f"quaid/comparator/r{mqtt_queue_no}/telemetry"
++
++    if args.dashboard_mqtt:
++        logging.info("Dashboard MQTT telemetry topic: %s", dashboard_mqtt_topic)
+ 
+     # Create the environment and connect to it
+     env = QuaidEnv(env_settings)
+@@ -298,6 +320,8 @@
+         policy_rnn_hidden_size=args.policy_rnn_hidden_size,
+         embedding_gru_layers=args.embedding_gru_layers,
+         embedding_gru_hidden_size=args.embedding_gru_hidden_size,
++        dashboard_mqtt_enabled=args.dashboard_mqtt,
++        dashboard_mqtt_topic=dashboard_mqtt_topic,
+     )
+ 
+     # Run the comparator player
+
+--- a/player.py
++++ b/player.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import json
+ import logging
+ import re
+ import time
+@@ -40,6 +41,8 @@
+         max_test_steps: int = 500,
+         test_step_delay_ms: int = 0,
+         device: str = "cpu",
++        dashboard_mqtt_enabled: bool = False,
++        dashboard_mqtt_topic: str | None = None,
+     ) -> None:
+         self.env = env
+         self.comparator_config = comparator_config
+@@ -59,6 +62,11 @@
+         self.test_step_delay_ms = test_step_delay_ms
+         self.device = device
+ 
++        # Dashboard MQTT settings. The controller already owns the MQTT
++        # connection, so this class only publishes telemetry through it.
++        self.dashboard_mqtt_enabled = bool(dashboard_mqtt_enabled)
++        self.dashboard_mqtt_topic = dashboard_mqtt_topic
++
+         # Get the action and observation dimensions
+         self._action_dim = int(np.prod(env.action_space.shape))
+         self._obs_dim = int(np.prod(env.observation_space.shape))
+@@ -231,6 +239,13 @@
+                 self.test_episodes,
+                 playbook_entry,
+                 current_policy,
++            )
++
++            self._publish_dashboard_episode_start(
++                episode_no=episode_no,
++                playbook_entry=playbook_entry,
++                current_policy=current_policy,
++                episode_uses_comparator=episode_uses_comparator,
+             )
+ 
+             episode_start = time.perf_counter()
+@@ -418,6 +433,14 @@
+                         step_info=step_info,
+                     )
+ 
++                    self._publish_dashboard_step(
++                        episode_no=episode_no,
++                        playbook_entry=playbook_entry,
++                        episode_uses_comparator=episode_uses_comparator,
++                        step_info=step_info,
++                        active_policy_after_step=current_policy,
++                    )
++
+                 # ------------------------------------------------------------------
+                 # Previous-action update block
+                 # ------------------------------------------------------------------
+@@ -470,6 +493,171 @@
+         return self.stats
+     
+ 
++
++    def _publish_dashboard_episode_start(
++        self,
++        *,
++        episode_no: int,
++        playbook_entry: str,
++        current_policy: str,
++        episode_uses_comparator: bool,
++    ) -> None:
++        """Notify the dashboard that a new episode has started."""
++
++        payload = {
++            "event_type": "episode_start",
++            "episode_no": int(episode_no),
++            "episode_display": int(episode_no) + 1,
++            "playbook_entry": str(playbook_entry),
++            "episode_uses_comparator": bool(episode_uses_comparator),
++            "current_policy": str(current_policy),
++            "run_dir": str(self.output_dir) if self.output_dir is not None else None,
++            "timestamp_unix": time.time(),
++        }
++
++        self._publish_dashboard_payload(payload)
++
++
++    def _publish_dashboard_step(
++        self,
++        *,
++        episode_no: int,
++        playbook_entry: str,
++        episode_uses_comparator: bool,
++        step_info,
++        active_policy_after_step: str,
++    ) -> None:
++        """Publish one comparator timestep telemetry payload for the dashboard."""
++
++        policy_vote_counts = self._json_loads_or_empty_dict(
++            getattr(step_info, "policy_vote_counts_json", None)
++        )
++
++        candidate_filter_counts = self._json_loads_or_empty_dict(
++            getattr(step_info, "candidate_filter_counts_json", None)
++        )
++
++        payload = {
++            "event_type": "step",
++            "episode_no": int(episode_no),
++            "episode_display": int(episode_no) + 1,
++            "playbook_entry": str(playbook_entry),
++            "episode_uses_comparator": bool(episode_uses_comparator),
++            "step": int(getattr(step_info, "step", -1)),
++            "current_policy": str(getattr(step_info, "current_policy", "")),
++            "next_policy": str(getattr(step_info, "next_policy", "")),
++            "active_policy_after_step": str(active_policy_after_step),
++            "switch_committed": bool(getattr(step_info, "switch_committed", False)),
++            "can_switch": bool(getattr(step_info, "can_switch", False)),
++            "query_umap_x": self._optional_float(getattr(step_info, "query_umap_x", None)),
++            "query_umap_y": self._optional_float(getattr(step_info, "query_umap_y", None)),
++            "query_local_reward_mean": self._optional_float(
++                getattr(step_info, "query_local_reward_mean", None)
++            ),
++            "candidate_count": int(getattr(step_info, "candidate_count", 0) or 0),
++            "policy_vote_counts": policy_vote_counts,
++            "candidate_filter_counts": candidate_filter_counts,
++            "selected_policy_count": self._optional_int(
++                getattr(step_info, "selected_policy_count", None)
++            ),
++            "selected_policy_fraction": self._optional_float(
++                getattr(step_info, "selected_policy_fraction", None)
++            ),
++            "second_policy": getattr(step_info, "second_policy", None),
++            "second_policy_count": self._optional_int(
++                getattr(step_info, "second_policy_count", None)
++            ),
++            "second_policy_fraction": self._optional_float(
++                getattr(step_info, "second_policy_fraction", None)
++            ),
++            "vote_margin": self._optional_float(getattr(step_info, "vote_margin", None)),
++            "step_reward_total": self._optional_float(
++                getattr(step_info, "step_reward_total", None)
++            ),
++            "episode_reward_total": self._optional_float(
++                getattr(step_info, "episode_reward_total", None)
++            ),
++            "reward_distance": self._optional_float(getattr(step_info, "reward_distance", None)),
++            "reward_roll": self._optional_float(getattr(step_info, "reward_roll", None)),
++            "reward_current": self._optional_float(getattr(step_info, "reward_current", None)),
++            "reward_yaw": self._optional_float(getattr(step_info, "reward_yaw", None)),
++            "reward_pitch": self._optional_float(getattr(step_info, "reward_pitch", None)),
++            "reward_action_smoothness": self._optional_float(
++                getattr(step_info, "reward_action_smoothness", None)
++            ),
++            "run_dir": str(self.output_dir) if self.output_dir is not None else None,
++            "timestamp_unix": time.time(),
++        }
++
++        self._publish_dashboard_payload(payload)
++
++
++    def _publish_dashboard_payload(self, payload: dict) -> None:
++        """Publish a dashboard payload if dashboard telemetry is enabled."""
++
++        if not self.dashboard_mqtt_enabled:
++            return
++
++        if not self.dashboard_mqtt_topic:
++            return
++
++        controller = getattr(self.env, "controller", None)
++
++        if controller is None:
++            log.debug("Dashboard MQTT telemetry skipped because env has no controller.")
++            return
++
++        try:
++            controller.publish_json(self.dashboard_mqtt_topic, payload, qos=0, retain=False)
++        except AttributeError:
++            log.warning(
++                "Dashboard MQTT telemetry requires MqttController.publish_json(). "
++                "Add the helper method to mqtt_controller.py."
++            )
++        except Exception:
++            log.exception("Failed to publish dashboard MQTT telemetry.")
++
++
++    @staticmethod
++    def _json_loads_or_empty_dict(value) -> dict:
++        """Decode a JSON dictionary, returning an empty dictionary on failure."""
++
++        if value is None:
++            return {}
++
++        try:
++            decoded_value = json.loads(value)
++        except (TypeError, json.JSONDecodeError):
++            return {}
++
++        if isinstance(decoded_value, dict):
++            return decoded_value
++
++        return {}
++
++
++    @staticmethod
++    def _optional_float(value) -> float | None:
++        if value is None:
++            return None
++
++        try:
++            return float(value)
++        except (TypeError, ValueError):
++            return None
++
++
++    @staticmethod
++    def _optional_int(value) -> int | None:
++        if value is None:
++            return None
++
++        try:
++            return int(value)
++        except (TypeError, ValueError):
++            return None
++
++
+     def _pause_between_episodes(self) -> None:
+         """
+         Pause the robot between episodes until the controller receives P0.

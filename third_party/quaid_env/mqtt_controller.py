@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Iterable, Optional, Sequence
+import json
 
 import paho.mqtt.client as mqtt
 
@@ -173,6 +174,19 @@ class MqttController:
     # ---------------------------------------------------- send to the robot
     def _send(self, topic: str, payload: bytes) -> None:
         self._client.publish(topic, payload, qos=1)
+
+    def publish_json(
+        self,
+        topic: str,
+        payload: dict,
+        *,
+        qos: int = 0,
+        retain: bool = False,
+    ) -> None:
+        """Publish UTF-8 JSON to an arbitrary MQTT topic."""
+
+        encoded_payload = json.dumps(payload).encode("utf-8")
+        self._client.publish(topic, encoded_payload, qos=qos, retain=retain)
 
     def act(self, action: Sequence[float]) -> None:
         """Publish an 8-dim policy action.

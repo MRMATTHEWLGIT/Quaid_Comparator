@@ -130,6 +130,19 @@ def get_args(argv=None) -> argparse.Namespace:
         action="store_true"
     )
 
+    parser.add_argument(
+        "--dashboard-mqtt",
+        action="store_true",
+        help="Publish live comparator timestep telemetry for the Streamlit dashboard.",
+    )
+
+    parser.add_argument(
+        "--dashboard-mqtt-topic",
+        default=None,
+        help="MQTT topic for dashboard telemetry. Defaults to "
+            "quaid/comparator/r<queue>/telemetry.",
+    )
+
     args = parser.parse_args(argv)
 
     # Validate the comparator config
@@ -274,6 +287,15 @@ def main(argv=None) -> int:
         # Stored as a string to match the QuaidEnv configuration format.
         env_settings.ports.mqtt_queue_no = str(args.mqtt_queue)
 
+    # Establish the MQTT topic for the dashboard telemetry
+    dashboard_mqtt_topic = args.dashboard_mqtt_topic
+    if dashboard_mqtt_topic is None:
+        mqtt_queue_no = env_settings.ports.mqtt_queue_no
+        dashboard_mqtt_topic = f"quaid/comparator/r{mqtt_queue_no}/telemetry"
+
+    if args.dashboard_mqtt:
+        logging.info("Dashboard MQTT telemetry topic: %s", dashboard_mqtt_topic)
+
     # Create the environment and connect to it
     env = QuaidEnv(env_settings)
     env.connect()
@@ -298,17 +320,28 @@ def main(argv=None) -> int:
         policy_rnn_hidden_size=args.policy_rnn_hidden_size,
         embedding_gru_layers=args.embedding_gru_layers,
         embedding_gru_hidden_size=args.embedding_gru_hidden_size,
+        dashboard_mqtt_enabled=args.dashboard_mqtt,
+        dashboard_mqtt_topic=dashboard_mqtt_topic,
     )
 
     # Run the comparator player
     try:
         comparator_player.play()
         comparator_player.stats.print_summary()
+
+    except KeyboardInterrupt:
+        logging.info("Comparator run interrupted by user.")
+        return 130
+
+    except Exception:
+        logging.exception("Comparator run failed.")
+        return 1
+
     finally:
         comparator_player.close()
         env.close()
 
-        return 0
+    return 0
 
 
 if __name__ == "__main__":

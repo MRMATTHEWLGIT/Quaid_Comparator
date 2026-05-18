@@ -40,6 +40,8 @@ class ComparatorPlayer:
         max_test_steps: int = 500,
         test_step_delay_ms: int = 0,
         device: str = "cpu",
+        dashboard_mqtt_enabled: bool = False,
+        dashboard_mqtt_topic: str | None = None,
     ) -> None:
         self.env = env
         self.comparator_config = comparator_config
@@ -58,6 +60,11 @@ class ComparatorPlayer:
         self.max_test_steps = max_test_steps
         self.test_step_delay_ms = test_step_delay_ms
         self.device = device
+
+        # Dashboard MQTT settings. The controller already owns the MQTT
+        # connection, so this class only publishes telemetry through it.
+        self.dashboard_mqtt_enabled = bool(dashboard_mqtt_enabled)
+        self.dashboard_mqtt_topic = dashboard_mqtt_topic
 
         # Get the action and observation dimensions
         self._action_dim = int(np.prod(env.action_space.shape))
@@ -186,6 +193,173 @@ class ComparatorPlayer:
         )
 
 
+    def _publish_dashboard_episode_start(
+        self,
+        *,
+        episode_no: int,
+        playbook_entry: str,
+        current_policy: str,
+        episode_uses_comparator: bool,
+    ) -> None:
+        """
+        Publish an MQTT message telling the dashboard to reset for a new episode.
+        """
+
+        payload = {
+            "event_type": "episode_start",
+            "episode_no": int(episode_no),
+            "episode_display": int(episode_no) + 1,
+            "playbook_entry": str(playbook_entry),
+            "current_policy": str(current_policy),
+            "episode_uses_comparator": bool(episode_uses_comparator),
+            "max_test_steps": int(self.max_test_steps),
+            "timestamp_unix": time.time(),
+        }
+
+        self._publish_dashboard_payload(payload)
+
+
+    def _publish_dashboard_step(
+        self,
+        *,
+        episode_no: int,
+        playbook_entry: str,
+        episode_uses_comparator: bool,
+        step_info,
+        active_policy_after_step: str,
+    ) -> None:
+        """
+        Publish one live comparator timestep message for the dashboard.
+        """
+
+        if step_info is None:
+            return
+
+        # Convert the ComparatorStepInfo dataclass/object into a plain dictionary.
+        payload = vars(step_info).copy()
+
+        payload.update(
+            {
+                "event_type": "step",
+                "episode_no": int(episode_no),
+                "episode_display": int(episode_no) + 1,
+                "playbook_entry": str(playbook_entry),
+                "episode_uses_comparator": bool(episode_uses_comparator),
+                "active_policy_after_step": str(active_policy_after_step),
+                "timestamp_unix": time.time(),
+            }
+        )
+
+        # For dashboard plotting, it is useful for current_policy to represent the
+        # policy that is active after any committed switch.
+        payload["current_policy"] = str(active_policy_after_step)
+
+        # Also expose parsed versions of JSON string fields for the dashboard.
+        self._add_parsed_json_field(
+            payload,
+            source_key="policy_vote_counts_json",
+            target_key="policy_vote_counts",
+        )
+
+        self._add_parsed_json_field(
+            payload,
+            source_key="candidate_filter_counts_json",
+            target_key="candidate_filter_counts",
+        )
+
+        self._publish_dashboard_payload(payload)
+
+
+    def _add_parsed_json_field(
+        self,
+        payload: dict,
+        *,
+        source_key: str,
+        target_key: str,
+    ) -> None:
+        """
+        Add a parsed JSON field to the payload when the source field is available.
+        """
+
+        import json
+
+        value = payload.get(source_key)
+
+        if value is None:
+            return
+
+        try:
+            payload[target_key] = json.loads(value)
+
+        except (TypeError, json.JSONDecodeError):
+            payload[target_key] = None
+
+
+    def _publish_dashboard_payload(self, payload: dict) -> None:
+        """
+        Publish a dashboard payload through the environment MQTT controller.
+
+        This is intentionally fail-safe: dashboard telemetry should never crash the
+        actual comparator rollout.
+        """
+
+        if not getattr(self, "dashboard_mqtt_enabled", False):
+            return
+
+        if not self.dashboard_mqtt_topic:
+            return
+
+        try:
+            safe_payload = self._make_dashboard_json_safe(payload)
+            self.env.controller.publish_json(self.dashboard_mqtt_topic, safe_payload)
+
+        except Exception:
+            log.exception("Failed to publish dashboard MQTT telemetry.")
+
+
+    def _make_dashboard_json_safe(self, value):
+        """
+        Convert numpy/Python values into JSON-safe values.
+        """
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._make_dashboard_json_safe(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list | tuple):
+            return [
+                self._make_dashboard_json_safe(item)
+                for item in value
+            ]
+
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+
+        if isinstance(value, np.bool_):
+            return bool(value)
+
+        if isinstance(value, np.integer):
+            return int(value)
+
+        if isinstance(value, np.floating):
+            value = float(value)
+
+            if not np.isfinite(value):
+                return None
+
+            return value
+
+        if isinstance(value, float):
+            if not np.isfinite(value):
+                return None
+
+            return value
+
+        return value
+
+
     def play(self) -> InferenceStats:
         """
         Run comparator-based policy-switching rollouts.
@@ -231,6 +405,14 @@ class ComparatorPlayer:
                 self.test_episodes,
                 playbook_entry,
                 current_policy,
+            )
+
+            # Publish the episode start event to the dashboard
+            self._publish_dashboard_episode_start(
+                episode_no=episode_no,
+                playbook_entry=playbook_entry,
+                current_policy=current_policy,
+                episode_uses_comparator=episode_uses_comparator,
             )
 
             episode_start = time.perf_counter()
@@ -416,6 +598,15 @@ class ComparatorPlayer:
                     self.stats.record_comparator_step(
                         episode_no=episode_no,
                         step_info=step_info,
+                    )
+
+                    # Publish the step event to the dashboard
+                    self._publish_dashboard_step(
+                        episode_no=episode_no,
+                        playbook_entry=playbook_entry,
+                        episode_uses_comparator=episode_uses_comparator,
+                        step_info=step_info,
+                        active_policy_after_step=current_policy,
                     )
 
                 # ------------------------------------------------------------------

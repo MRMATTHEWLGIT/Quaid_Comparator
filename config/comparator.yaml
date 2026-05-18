@@ -1,12 +1,9 @@
 # The initial policy to use for the comparator
-initial_policy: "flat"
+initial_policy: "ramp"
 
 # The policies to use for each episode
 # The length of the playbook determines the number of episodes
 episode_playbook:
-  - flat
-  - flat
-  - flat
   - comparator
   - comparator
   - comparator
