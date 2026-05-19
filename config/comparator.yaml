@@ -1,10 +1,11 @@
 # The initial policy to use for the comparator
-initial_policy: "ramp"
+initial_policy: "uneven"
 
 # The policies to use for each episode
 # The length of the playbook determines the number of episodes
 episode_playbook:
-  - comparator
+  - uneven
+  - uneven
   - comparator
   - comparator
 
@@ -46,4 +47,4 @@ hyperparameters:
   min_vote_candidates: 10
   min_vote_fraction: 0.50
   min_vote_margin: 0.10
-  required_consecutive_policy_votes: 1
+  required_consecutive_policy_votes: 2

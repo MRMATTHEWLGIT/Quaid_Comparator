@@ -168,6 +168,151 @@ def parse_json_cell(value, default):
 
     except json.JSONDecodeError:
         return default
+    
+
+def normalise_runtime_step_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise runtime logging columns so analysis works for both old and new
+    comparator logs.
+
+    New logs contain one row per robot step. Only some rows have
+    comparator_ran == 1.
+    """
+
+    df = df.copy()
+
+    numeric_columns = [
+        "episode_no",
+        "step",
+        "switch_committed",
+        "can_switch",
+        "candidate_count",
+        "selected_policy_count",
+        "selected_policy_fraction",
+        "second_policy_count",
+        "second_policy_fraction",
+        "vote_margin",
+        "query_local_reward_mean",
+        "query_umap_x",
+        "query_umap_y",
+        "reward_distance",
+        "reward_roll",
+        "reward_current",
+        "reward_yaw",
+        "reward_pitch",
+        "reward_action_smoothness",
+        "step_reward_total",
+        "episode_reward_total",
+        "comparator_ran",
+    ]
+
+    for column in numeric_columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    # Backwards compatibility for older logs that do not have comparator_ran.
+    # In old logs, every stored row was effectively a comparator row.
+    if "comparator_ran" not in df.columns:
+        df["comparator_ran"] = 1
+
+    df["comparator_ran"] = (
+        pd.to_numeric(df["comparator_ran"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+    if "switch_committed" in df.columns:
+        df["switch_committed"] = (
+            pd.to_numeric(df["switch_committed"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+    if "can_switch" in df.columns:
+        df["can_switch"] = (
+            pd.to_numeric(df["can_switch"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+    return df
+
+
+def get_comparator_ran_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Return True only for rows where the expensive comparator selection actually ran.
+    """
+
+    if df.empty:
+        return pd.Series(False, index=df.index)
+
+    if "comparator_ran" not in df.columns:
+        # Backwards compatibility for older logs.
+        return pd.Series(True, index=df.index)
+
+    return (
+        pd.to_numeric(df["comparator_ran"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        == 1
+    )
+
+
+def get_comparator_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return only rows where comparator selection ran.
+    """
+
+    if df.empty:
+        return df.copy()
+
+    return df[get_comparator_ran_mask(df)].copy()
+
+
+def get_query_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return only fresh comparator rows with valid UMAP query coordinates.
+    """
+
+    required_columns = {"query_umap_x", "query_umap_y"}
+
+    if df.empty or not required_columns.issubset(df.columns):
+        return pd.DataFrame()
+
+    comparator_df = get_comparator_rows(df)
+
+    return comparator_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
+
+
+def add_playbook_columns(
+    steps_df: pd.DataFrame,
+    comparator_config_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Add playbook_entry and episode_uses_comparator columns using comparator.yaml.
+    """
+
+    steps_df = steps_df.copy()
+
+    with open(comparator_config_path, "r", encoding="utf-8") as file:
+        comparator_config = yaml.safe_load(file)
+
+    episode_playbook = comparator_config.get("episode_playbook", [])
+
+    def get_playbook_entry(episode_no):
+        episode_index = int(episode_no)
+
+        if 0 <= episode_index < len(episode_playbook):
+            return str(episode_playbook[episode_index])
+
+        return "unknown"
+
+    steps_df["playbook_entry"] = steps_df["episode_no"].apply(get_playbook_entry)
+    steps_df["episode_uses_comparator"] = (
+        steps_df["playbook_entry"].astype(str) == "comparator"
+    )
+
+    return steps_df
 
 
 # -------------------------------------------------------------------------
@@ -330,7 +475,9 @@ def add_candidate_umap_summary_columns(
     for column in summary_columns:
         df[column] = np.nan
 
-    for row_index, row in df.iterrows():
+    comparator_rows = get_comparator_rows(df)
+
+    for row_index, row in comparator_rows.iterrows():
 
         candidate_indices = parse_json_cell(
             row.get("candidate_indices_json"),
@@ -457,7 +604,11 @@ def plot_umap_database_and_queries(
     # Plot live query embeddings on top, separated by current policy
     # ------------------------------------------------------------------
 
-    query_df = steps_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
+    query_df = get_query_rows(steps_df)
+
+    if len(query_df) == 0:
+        plt.close(fig)
+        return
 
     for policy in policy_labels:
 
@@ -524,7 +675,7 @@ def plot_query_trajectory(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    query_df = steps_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
+    query_df = get_query_rows(steps_df)
 
     if len(query_df) == 0:
         return
@@ -602,7 +753,10 @@ def plot_vote_counts_over_time(
     if len(vote_columns) == 0:
         return
 
-    episode_df = steps_df.sort_values("step").copy()
+    episode_df = get_comparator_rows(steps_df).sort_values("step").copy()
+
+    if len(episode_df) == 0:
+        return
 
     # If older databases do not have can_switch, treat all points as active.
     if "can_switch" in episode_df.columns:
@@ -1040,11 +1194,20 @@ def infer_episode_label(episode_df: pd.DataFrame) -> str:
     Infer whether an episode was fixed-policy or comparator-controlled.
     """
 
-    first_policy = str(episode_df["current_policy"].iloc[0])
+    if "playbook_entry" in episode_df.columns:
+        playbook_entry = str(episode_df["playbook_entry"].iloc[0])
+        if playbook_entry:
+            return playbook_entry
+
+    if "episode_uses_comparator" in episode_df.columns:
+        uses_comparator = bool(episode_df["episode_uses_comparator"].astype(bool).any())
+        if uses_comparator:
+            return "comparator"
 
     if "can_switch" in episode_df.columns and episode_df["can_switch"].astype(bool).any():
         return "comparator"
 
+    first_policy = str(episode_df["current_policy"].iloc[0])
     return first_policy
 
 
@@ -1422,6 +1585,11 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     steps_df = load_comparator_steps(paths["inference_db_path"])
+    steps_df = normalise_runtime_step_columns(steps_df)
+    steps_df = add_playbook_columns(
+        steps_df=steps_df,
+        comparator_config_path=paths["comparator_config_path"],
+    )
 
     database = load_comparator_database(paths["database_path"])
     metadata = load_metadata(paths["metadata_path"])
