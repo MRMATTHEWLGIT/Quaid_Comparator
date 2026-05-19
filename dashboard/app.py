@@ -244,15 +244,31 @@ def derive_terrain_names(
 # Plot helpers
 # ---------------------------------------------------------------------------
 
+def get_comparator_ran_mask(df: pd.DataFrame) -> pd.Series:
+    """Return a safe boolean mask for rows where comparator selection actually ran."""
+
+    if df.empty or "comparator_ran" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    return (
+        pd.to_numeric(df["comparator_ran"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        == 1
+    )
+
+
 def get_query_df(steps_df: pd.DataFrame) -> pd.DataFrame:
-    """Return only rows with valid live query UMAP coordinates."""
+    """Return only fresh comparator rows with valid live query UMAP coordinates."""
 
     required_columns = {"query_umap_x", "query_umap_y"}
 
     if steps_df.empty or not required_columns.issubset(steps_df.columns):
         return pd.DataFrame()
 
-    return steps_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
+    comparator_df = steps_df[get_comparator_ran_mask(steps_df)].copy()
+
+    return comparator_df.dropna(subset=["query_umap_x", "query_umap_y"]).copy()
 
 
 def get_switch_mask(df: pd.DataFrame) -> pd.Series:
@@ -609,6 +625,7 @@ def main() -> None:
             "selected_policy_fraction",
             "vote_margin",
             "switch_committed",
+            "comparator_ran",
         ]
 
         for column in numeric_columns:

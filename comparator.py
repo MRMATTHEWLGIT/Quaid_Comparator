@@ -729,6 +729,7 @@ class Comparator:
         # Reset the pending policy and its count
         self.pending_policy = None
         self.pending_policy_count = 0
+        self.last_step_info = None
 
 
     def update_query_history(self, state: np.ndarray) -> None:
@@ -1050,6 +1051,7 @@ class Comparator:
             selected_policy_count=None,
             selected_policy_fraction=None,
             candidate_filter_counts_json=None,
+            comparator_ran=True,
         )
 
         # Compute the live query statistics from the current history buffer

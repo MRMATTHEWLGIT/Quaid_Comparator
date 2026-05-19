@@ -94,6 +94,8 @@ class ComparatorStepInfo:
     step_reward_total: Optional[float] = None
     episode_reward_total: Optional[float] = None
 
+    comparator_ran: Optional[bool] = False
+
 
 class InferenceStats:
     """Collects per-episode and aggregate statistics across an evaluation run."""
@@ -151,7 +153,8 @@ class InferenceStats:
                 " reward_roll REAL,"
                 " reward_current REAL,"
                 " step_reward_total REAL,"
-                " episode_reward_total REAL)"
+                " episode_reward_total REAL,"
+                " comparator_ran INTEGER)"
             )
             self._sqlite.commit()
 
@@ -213,8 +216,9 @@ class InferenceStats:
             " reward_roll,"
             " reward_current,"
             " step_reward_total,"
-            " episode_reward_total"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " episode_reward_total,"
+            "comparator_ran"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(episode_no),
                 int(step_info.step),
@@ -243,6 +247,7 @@ class InferenceStats:
                 step_info.reward_current,
                 step_info.step_reward_total,
                 step_info.episode_reward_total,
+                int(bool(step_info.comparator_ran))
             ),
         )
 

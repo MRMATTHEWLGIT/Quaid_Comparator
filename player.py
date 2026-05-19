@@ -10,7 +10,7 @@ from collections import deque
 import numpy as np
 
 from runner import OnnxRnnPolicyRunner
-from stats import InferenceStats, EpisodeStats
+from stats import InferenceStats, EpisodeStats, ComparatorStepInfo
 from preprocessor import AddActionsPreprocessor
 from comparator import Comparator
 
@@ -75,6 +75,15 @@ class ComparatorPlayer:
         self.policy_configs = comparator_config["policies"]
         self.comparator_assets_dir = comparator_config["comparator_assets_dir"]
         self.comparator_hyperparameters = comparator_config["hyperparameters"]
+
+        # Load the comparator interval steps hyperparameter
+        self.comparator_interval_steps = int(
+            self.comparator_hyperparameters.get("comparator_interval_steps", 1)
+        )
+        if self.comparator_interval_steps < 1:
+            raise ValueError(
+                f"comparator_interval_steps must be >= 1, got {self.comparator_interval_steps}"
+            )
 
         # Load the episode playbook. The playbook controls both the episode count and
         # whether each episode is run as a fixed-policy baseline or comparator episode.
@@ -426,10 +435,10 @@ class ComparatorPlayer:
 
             for step in range(self.max_test_steps):
 
+                inference_start = time.perf_counter_ns()
+
                 # Save the current policy to the policy history
                 policy_history.append(current_policy)
-
-                inference_start = time.perf_counter_ns()
 
                 if current_policy not in self.policy_runners:
                     raise KeyError(f"Unknown current policy: {current_policy}")
@@ -509,81 +518,109 @@ class ComparatorPlayer:
 
                 self.comparator.update_query_history(comparator_state)
 
-                # Run the comparator every step so that fixed-policy baseline episodes
-                # still produce query embeddings, vote counts, UMAP coordinates, and
-                # reward logs. For fixed-policy episodes, the comparator decision is
-                # recorded for analysis but is not allowed to change the active policy.
-                proposed_policy = self.comparator.select_policy(
-                    current_policy=current_policy,
-                    step=step,
+                # Only run the expensive comparator decision every N robot-control steps.
+                # The query history is still updated every step at the robot control rate.
+                run_comparator_this_step = (
+                    step % self.comparator_interval_steps == 0
                 )
 
-                if proposed_policy not in self.policy_runners:
-                    raise KeyError(f"Comparator selected unknown policy: {proposed_policy}")
+                proposed_policy = current_policy
+
+                if run_comparator_this_step:
+                    proposed_policy = self.comparator.select_policy(
+                        current_policy=current_policy,
+                        step=step,
+                    )
+
+                    step_info = self.comparator.last_step_info
+
+                    if step_info is not None:
+                        step_info.comparator_ran = True
+
+                else:
+                    # Create a fresh lightweight logging row on non-comparator steps.
+                    # This publishes reward/current-policy/dashboard telemetry at 20 Hz,
+                    # but does not reuse stale UMAP/vote fields from the previous comparator decision.
+                    step_info = ComparatorStepInfo(
+                        step=int(step),
+                        current_policy=str(current_policy),
+                        next_policy=str(current_policy),
+                        switch_committed=False,
+                        can_switch=False,
+                        candidate_count=0,
+                        query_local_reward_mean=None,
+                        query_umap_x=None,
+                        query_umap_y=None,
+                        candidate_indices_json=None,
+                        policy_vote_counts_json=None,
+                        selected_policy_count=None,
+                        selected_policy_fraction=None,
+                        candidate_filter_counts_json=None,
+                        comparator_ran=False,
+                    )
 
                 # Comparator episodes can use the comparator's proposed policy.
-                # Fixed-policy episodes ignore the proposal and keeps the playbook policy.
+                # Fixed-policy episodes ignore the proposal and keep the playbook policy.
                 if episode_uses_comparator:
                     next_policy = proposed_policy
                 else:
                     next_policy = current_policy
 
-                inference_times.append((time.perf_counter_ns() - inference_start) // 1000)
-
                 # ------------------------------------------------------------------
                 # Policy switch commit block
                 # ------------------------------------------------------------------
 
-                # Determine if the policy history is full and if it is pure
-                history_is_full = len(policy_history) == self.comparator.sequence_length
-                history_is_policy_pure = all(
-                    policy == current_policy
-                    for policy in policy_history
-                )
-
-                # Extract the last step info from the comparator
-                step_info = self.comparator.last_step_info
-
                 switch_committed = False
-                can_switch = (episode_uses_comparator and history_is_full and history_is_policy_pure)
 
-                # Store the can_switch flag in the step info
-                if step_info is not None:
+                if step_info is not None and run_comparator_this_step:
+
+                    # Determine if the policy history is full and if it is pure
+                    history_is_full = len(policy_history) == self.comparator.sequence_length
+                    history_is_policy_pure = all(
+                        policy == current_policy
+                        for policy in policy_history
+                    )
+
+                    # Is the comparator allowed to switch the policy at this step?
+                    can_switch = (
+                        episode_uses_comparator
+                        and history_is_full
+                        and history_is_policy_pure
+                    )
+
                     step_info.can_switch = can_switch
 
-                if next_policy != current_policy and can_switch:
+                    if episode_uses_comparator and next_policy != current_policy and can_switch:
+                        previous_policy = current_policy
+                        current_policy = next_policy
+                        switch_committed = True
 
-                    previous_policy = current_policy
-                    current_policy = next_policy
-                    switch_committed = True
+                        log.info(
+                            "Comparator switched policy at episode=%d step=%d: %s -> %s",
+                            episode_no + 1,
+                            step,
+                            previous_policy,
+                            current_policy,
+                        )
 
-                    log.info(
-                        "Comparator switched policy at episode=%d step=%d: %s -> %s",
-                        episode_no + 1,
-                        step,
-                        previous_policy,
-                        current_policy,
-                    )
+                    elif next_policy != current_policy:
 
-                elif next_policy != current_policy:
+                        log.debug(
+                            "Comparator switch blocked at episode=%d step=%d: %s -> %s "
+                            "(episode_uses_comparator=%s)",
+                            episode_no + 1,
+                            step,
+                            current_policy,
+                            next_policy,
+                            episode_uses_comparator,
+                        )
 
-                    log.debug(
-                        "Comparator switch blocked at episode=%d step=%d: %s -> %s "
-                        "(episode_uses_comparator=%s)",
-                        episode_no + 1,
-                        step,
-                        current_policy,
-                        next_policy,
-                        episode_uses_comparator,
-                    )
+                    step_info.switch_committed = switch_committed
 
                 # Record the comparator step information if it exists
                 if step_info is not None:
                     step_info.switch_committed = switch_committed
-
-                    # For fixed-policy episodes, record the next policy as the current policy
-                    if not episode_uses_comparator:
-                        step_info.next_policy = current_policy
+                    step_info.next_policy = next_policy
 
                     # Record the reward breakdown statistics
                     step_info.reward_distance = reward_distance
@@ -608,6 +645,9 @@ class ComparatorPlayer:
                         step_info=step_info,
                         active_policy_after_step=current_policy,
                     )
+
+                # Calculates the total step runtime
+                inference_times.append((time.perf_counter_ns() - inference_start) // 1000)
 
                 # ------------------------------------------------------------------
                 # Previous-action update block
